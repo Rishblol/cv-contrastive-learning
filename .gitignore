@@ -1,1 +1,7 @@
 CheXpert-v1.0-small/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+data/processed/
+outputs/

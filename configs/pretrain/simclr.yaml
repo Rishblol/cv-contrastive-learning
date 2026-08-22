@@ -1,0 +1,13 @@
+seed: 42
+device: auto
+manifest: data/processed/manifests/pretrain_train.csv
+output_dir: outputs/pretrain/simclr-resnet50-seed42
+encoder: resnet50
+image_size: 224
+projection_dim: 128
+batch_size: 256
+num_workers: 4
+epochs: 200
+temperature: 0.2
+learning_rate: 0.0003
+weight_decay: 0.0001
