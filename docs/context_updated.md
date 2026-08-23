@@ -1,0 +1,429 @@
+# Self-Supervised Contrastive Learning for Label-Efficient Medical Image Classification
+
+## 1. Project Context
+
+This project investigates whether self-supervised contrastive learning (SSL) can reduce the amount of labeled data required for clinically useful chest X-ray classification. The dataset is the bundled CheXpert-v1.0-small release. It contains frontal and lateral chest radiographs with multi-label clinical observations, an official training manifest, and an official validation manifest.
+
+The main method is SimCLR: an encoder learns image representations from different augmented views of the same X-ray without using disease labels. The pretrained encoder is then evaluated on downstream disease prediction using progressively smaller labeled subsets. Its results are compared to models trained with labels alone.
+
+The project should prioritize a reliable, reproducible comparison over maximizing a single validation score.
+
+## 2. Research Question and Hypotheses
+
+### Primary research question
+
+Does SimCLR pretraining on unlabeled CheXpert radiographs improve downstream multi-label classification performance when only a small fraction of labels is available?
+
+### Hypotheses
+
+1. A SimCLR-pretrained encoder will outperform a supervised model trained from scratch at 1%, 5%, 10%, and 25% labeled-data budgets.
+2. The performance advantage will be largest at the lowest label budgets and narrow as the budget approaches 100%.
+3. Fine-tuning the full pretrained encoder will generally outperform a frozen linear probe, while the linear probe will show whether the learned representations are directly useful.
+4. Gains will differ by pathology because label prevalence, uncertainty, and image appearance differ across observations.
+
+## 3. Scope
+
+### In scope
+
+- Multi-label classification of five CheXpert competition observations:
+  - Atelectasis
+  - Cardiomegaly
+  - Consolidation
+  - Edema
+  - Pleural Effusion
+- SimCLR pretraining on all available training radiographs without labels.
+- Label-efficient downstream experiments at fixed label budgets.
+- Supervised baselines, linear-probe evaluation, and full fine-tuning.
+- Patient-level split controls, reproducible experiment tracking, and clinically cautious error analysis.
+
+### Out of scope for the first version
+
+- Diagnosis or clinical deployment.
+- Comparison with multiple SSL families such as MoCo, BYOL, DINO, or masked autoencoders.
+- Training on external datasets or reporting claims of generalization beyond CheXpert.
+- Use of images or labels from the official validation set during model selection.
+
+## 4. Dataset Protocol
+
+### Source files
+
+- `CheXpert-v1.0-small/train.csv`: source of pretraining and downstream-development records.
+- `CheXpert-v1.0-small/valid.csv`: final held-out evaluation manifest.
+- `CheXpert-v1.0-small/train/` and `CheXpert-v1.0-small/valid/`: image roots referenced by the manifests.
+
+### Record preparation
+
+1. Read the CSV manifests with a structured tabular loader.
+2. Convert each manifest path to a local path relative to the dataset root.
+3. Keep the source image path, patient ID, study ID, view, and the five selected labels in a prepared manifest.
+4. Exclude records whose image path is missing or unreadable, and log the count and paths in a data-quality report.
+5. Keep all available image views for pretraining. For downstream experiments, begin with frontal images (`AP` and `PA`) only because they are the most directly comparable; record the filtering count.
+6. Convert grayscale images to three identical channels to use an ImageNet-style ResNet-50 implementation without changing its input interface.
+
+### Target encoding and uncertainty policy
+
+CheXpert labels can be `1` (positive), `0` (negative), `-1` (uncertain), or blank (no mention). The downstream manifest must store both the raw value and the resolved binary target.
+
+Use the CheXpert U-Zeros/U-Ones convention below for the initial study:
+
+| Observation | Positive | Negative or blank | Uncertain (`-1`) |
+| --- | --- | --- | --- |
+| Atelectasis | 1 | 0 | 1 |
+| Cardiomegaly | 1 | 0 | 0 |
+| Consolidation | 1 | 0 | 0 |
+| Edema | 1 | 0 | 1 |
+| Pleural Effusion | 1 | 0 | 0 |
+
+This mapping must be implemented in one reusable preprocessing function and recorded in every run configuration. A later sensitivity experiment may compare this choice with uncertainty masking or alternative mappings, but it must not be mixed into the primary result table.
+
+### Leakage prevention and partitions
+
+- Extract patient identifiers from the image path or manifest metadata before any sampling.
+- Partition at patient level, never image level. A patient must appear in exactly one of train, development, or final validation.
+- From `train.csv`, make a patient-disjoint development split (target: 10% of patients) for early stopping, threshold selection, and hyperparameter selection. Use iterative multi-label stratification where practical; otherwise document class prevalence before and after splitting.
+- Keep `valid.csv` untouched until a configuration has been selected. It is the final held-out evaluation set.
+- Create and persist sampled patient IDs for every label budget and seed. Larger budgets should be nested within smaller-budget experiments for each seed where practical.
+
+## 5. Model Design
+
+### Shared encoder
+
+- Backbone: ResNet-50, initialized randomly for SimCLR and supervised-from-scratch baselines.
+- Input: normalized 3-channel 224 x 224 X-rays.
+- Feature representation: the global-average-pooled ResNet feature vector.
+- Classification head: one linear layer producing five independent logits.
+
+The encoder implementation should remain interchangeable so a smaller ResNet can be used for smoke tests without changing the training or evaluation interface.
+
+### SimCLR pretraining
+
+- Pretrain only on images from the training partition; do not use downstream labels.
+- Add a two-layer MLP projection head after the encoder. The contrastive loss operates on projected features, while downstream models use encoder features.
+- Use normalized embeddings and NT-Xent loss with a configurable temperature.
+- Start with a high-memory-GPU reference configuration: global batch size 256 or larger when memory permits, mixed precision, LARS or AdamW optimizer, cosine learning-rate schedule, and a warmup phase.
+- Train for a sufficiently long fixed schedule (reference: 200 epochs) after validating the pipeline with a short smoke run. Save best/last checkpoints and the exact configuration.
+
+### X-ray-safe augmentation policy
+
+SimCLR needs two independently augmented views of the same image, but X-ray transformations must preserve clinically meaningful anatomy.
+
+- Resize to a larger intermediate size, then use random resized crops with a conservative crop scale.
+- Use modest rotation and translation only.
+- Use mild brightness and contrast variation to model acquisition differences.
+- Use modest Gaussian blur or noise.
+- Do not apply hue or saturation changes to grayscale radiographs.
+- Avoid aggressive crops, large rotations, posterization, or cutout transforms that can remove pathology-bearing regions.
+- Treat horizontal flipping as a configurable ablation. The default primary protocol should disable it because laterality can be clinically informative.
+
+The project should save example pairs of augmented views before launching full training and manually inspect them for anatomical plausibility.
+
+### Downstream models
+
+Train three methods with identical data splits, input resolution, label mappings, and evaluation code:
+
+1. **Supervised from scratch**: random ResNet-50 plus classification head, trained only on the chosen labeled subset.
+2. **SimCLR linear probe**: freeze the pretrained encoder and train only the five-logit classification head.
+3. **SimCLR fine-tuning**: initialize from the pretrained encoder, then optimize the encoder and classification head together on the labeled subset.
+
+Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labeled training subset. Store the weights in the run metadata. Optimize AUROC-oriented model selection with the development set; do not select checkpoints from the official validation set.
+
+## 6. Experiment Matrix
+
+### Vision-language model extension
+
+Add a VLM track to determine whether image-text pretraining provides useful medical representations beyond image-only SimCLR. VLM results must be reported separately from SimCLR results because the VLM may have learned from external paired image-report data and therefore answers a different transfer-learning question.
+
+Use CheXzero as the primary VLM baseline because it is a CLIP-style model designed for chest X-ray image-text alignment and naturally supports pathology prompts. Pin the exact checkpoint and implementation revision. If CheXzero cannot be used because of an unavailable checkpoint or incompatible license, use one radiology-domain image-text model with equivalent image-embedding and text-embedding interfaces, and identify it as a protocol deviation in the report. Record its name, revision, source, pretraining data description, license, image preprocessing, and any known CheXpert overlap risk before use. Do not silently substitute a general-purpose natural-image CLIP model for the primary VLM result.
+
+The VLM track has three roles:
+
+1. **Zero-shot prompt classification**: score each X-ray against pathology-present and pathology-absent text prompts without fitting a CheXpert classifier. This measures direct language-grounded transfer.
+2. **Frozen VLM feature probe**: freeze the VLM image encoder and train the same five-logit linear head used for SimCLR. This isolates the quality of its visual representations under the project label budgets.
+3. **VLM fine-tuning**: fine-tune the image encoder and classification head at the same label budgets when the checkpoint license and hardware permit. Use a lower encoder learning rate than the newly initialized head.
+
+The primary image-only question remains SimCLR versus supervised learning from scratch. The VLM extension answers a secondary question: whether prior image-text alignment changes zero-shot performance, representation quality, or label efficiency relative to image-only SSL.
+
+### Prompt protocol for zero-shot VLM evaluation
+
+- Define prompts before evaluating the official validation set and version them in the repository.
+- Use paired prompts for every label, for example: `"chest radiograph with pleural effusion"` and `"chest radiograph without pleural effusion"`.
+- Use a small, clinically reviewed template set per label rather than selecting a single prompt after observing final-validation results. Templates may vary wording but must preserve the same clinical assertion.
+- Average normalized text embeddings across templates for each positive and negative concept.
+- Convert image-text similarities into a positive-class score using the positive-versus-negative similarity difference or a two-class softmax. Apply the identical score calculation to every pathology.
+- Select prompt templates, optional temperature scaling, and any score-calibration method using only the internal development split. Never tailor prompts to individual final-validation examples.
+- Report both uncalibrated zero-shot AUROC/AUPRC and calibrated threshold metrics. Calibration must not alter rank-based AUROC claims.
+
+### VLM analysis protocol
+
+Use VLMs as an analysis tool, not as a source of generated clinical labels or medical conclusions.
+
+- Compare SimCLR, supervised, and VLM feature spaces using UMAP or t-SNE only as qualitative visualizations; do not treat visual separation as a performance metric.
+- Produce class-conditioned retrieval panels: for selected validation queries, retrieve nearest training embeddings and inspect whether anatomy, acquisition artifacts, or pathology cues drive similarity. De-identify and keep examples local to the project.
+- Analyze error slices by view position (`AP` versus `PA`), patient age group if available, sex if available, and label prevalence. Omit a slice when its sample size is too small for stable estimates.
+- Use Grad-CAM or an equivalent image-attribution method for the classifier head. Mark every heatmap as a post-hoc explanation, not proof of clinical reasoning or localization.
+- If a text-generation-capable VLM is used for narrative analysis, restrict it to templated, non-diagnostic descriptions of model outputs and require human review. It must not create ground-truth labels, alter metrics, or be presented as a clinical report generator.
+- Maintain an error-analysis worksheet containing run ID, image ID, true labels, predicted probabilities, selected threshold, view, attribution artifact path, and a short reviewer observation.
+
+### Label budgets and seeds
+
+Run each downstream method at 1%, 5%, 10%, 25%, and 100% of labeled training patients. Use three fixed, published random seeds for each budget. All methods under a seed/budget pair must receive the exact same sampled patients.
+
+The image-only core produces 45 downstream runs: 3 methods x 5 budgets x 3 seeds. The VLM extension adds 15 frozen-probe runs (5 budgets x 3 seeds) and, if compute permits, 9 fine-tuning runs (1%, 10%, and 100% x 3 seeds). Run the VLM zero-shot evaluation once per fixed prompt set because it has no sampled-label training phase. SimCLR pretraining may be run once per training partition and reused across downstream budgets; run an additional pretraining seed only after the primary matrix is complete.
+
+### Recommended execution order
+
+1. Verify dataset paths and generate prepared manifests.
+2. Produce patient-disjoint partitions and persist their IDs.
+3. Run unit tests and a 100- to 1,000-image smoke test for each data loader and training loop.
+4. Train a supervised 100% baseline to establish a functioning end-to-end reference.
+5. Inspect SimCLR augmentation pairs, then run a short pretraining validation run.
+6. Complete full SimCLR pretraining and archive its checkpoint.
+7. Run linear-probe and fine-tuning experiments from smallest to largest label budget.
+8. Validate VLM preprocessing and prompt scoring on the development split; then run the zero-shot and frozen-feature experiments.
+9. Run VLM fine-tuning only after the frozen-feature and zero-shot results are complete and only at the designated budget tiers.
+10. Re-run failed or anomalous jobs only with a recorded reason.
+11. Lock selected configurations, evaluate once on official validation data, and generate the final report.
+
+### Initial hyperparameter defaults
+
+These are starting points, not results to tune against the official validation set.
+
+| Component | Initial configuration |
+| --- | --- |
+| Image size | 224 x 224 |
+| SSL backbone | ResNet-50 |
+| SSL epochs | 200 |
+| SSL temperature | 0.1 to 0.2, selected on development protocol |
+| SSL effective batch size | 256+ with gradient accumulation if required |
+| Downstream epochs | Up to 50 with development-set early stopping |
+| Fine-tuning optimizer | AdamW with discriminative or lower encoder learning rate |
+| Linear-probe optimizer | AdamW |
+| Precision | Automatic mixed precision |
+| Random seeds | Three fixed values saved in configuration |
+
+## 7. Metrics and Statistical Reporting
+
+### Primary metric
+
+Macro AUROC across the five observations on the official validation set. This gives every pathology equal influence despite class imbalance.
+
+### Secondary metrics
+
+- AUROC for each observation.
+- Macro and per-observation AUPRC.
+- Sensitivity, specificity, F1, and balanced accuracy at thresholds selected only on the development set.
+- Mean and standard deviation across seeds.
+- Patient-level bootstrap 95% confidence intervals for final AUROC and for the fine-tuned-SimCLR minus supervised-baseline difference.
+- Training time, peak GPU memory where available, epochs completed, and checkpoint size.
+- Zero-shot VLM metrics with the frozen prompt-set version and calibration status clearly identified.
+- Pairwise label-efficiency deltas at each budget: SimCLR fine-tuning minus supervised training, and VLM frozen probe minus SimCLR linear probe.
+- Slice-level performance with sample counts and confidence intervals where sufficiently powered; do not make subgroup claims from sparse slices.
+
+### Result presentation
+
+- Table: mean +/- standard deviation by method and label budget.
+- Plot: macro AUROC versus label fraction, with one curve per method and uncertainty bands.
+- Plot: per-pathology AUROC at 1%, 10%, and 100% label budgets.
+- Table: final validation metrics and confidence intervals for the selected settings.
+- Table: zero-shot, frozen-probe, and fine-tuned results, including a `pretraining modality` column (`none`, `image-only SSL`, `image-text VLM`) to prevent misleading direct claims.
+- Qualitative review: selected false positives and false negatives, retrieval examples, and attributions, explicitly framed as model behavior analysis rather than clinical advice.
+
+## 8. Reproducibility and Artifact Layout
+
+Use configuration files rather than hard-coded experiment values. Every run must record:
+
+- Dataset root and a hash or version identifier for prepared manifests.
+- Label set, uncertainty mapping, image-view filter, split IDs, label budget, and seed.
+- Augmentation parameters, architecture, optimizer, schedule, loss settings, batch size, precision, and software versions.
+- Git commit hash, command line, start/end timestamps, hardware, and checkpoint path.
+- For every VLM run: checkpoint identifier and revision, model-card URL/source, license review result, image processor version, prompt-set version, embedding normalization, scoring method, calibration method, and trainable modules.
+
+Recommended generated artifact layout:
+
+```text
+data/processed/
+  manifests/
+  splits/
+configs/
+  pretrain/
+  downstream/
+  vlm/
+  prompts/
+outputs/
+  pretrain/<run-id>/
+  downstream/<run-id>/
+  vlm/<run-id>/
+  analysis/<run-id>/
+  reports/
+```
+
+Generated images, checkpoints, cached manifests, and raw experiment outputs should be excluded from version control unless deliberately curated as small examples. Commit code, configurations, split definitions, summaries, and documentation.
+
+## 9. Validation and Tests
+
+Before expensive training, implement and run the following checks:
+
+1. Manifest parsing correctly resolves every sampled local image path.
+2. Target conversion matches the uncertainty table for synthetic rows containing `1`, `0`, `-1`, and blanks.
+3. No patient appears in more than one partition, label-budget subset, or final-validation overlap.
+4. The two-view SimCLR dataset returns distinct but anatomically plausible tensor views with the expected shape and finite values.
+5. The model returns five logits per image and the loss remains finite for an imbalanced mini-batch.
+6. A checkpoint reload produces the same evaluation outputs for fixed inputs.
+7. AUROC and AUPRC functions match known values on small synthetic examples and handle labels with a single class gracefully.
+8. A short end-to-end run writes metrics, configuration, split ID, checkpoint, and augmentation samples to the expected run directory.
+9. The VLM processor accepts the same sampled image records, emits finite embeddings of stable dimension, and preserves record order.
+10. Prompt scoring returns one score per image and pathology, handles template aggregation deterministically, and does not use labels at inference time.
+11. Frozen VLM features cannot receive gradients during a linear-probe run; selected modules receive gradients during the fine-tuning configuration.
+12. Retrieval and attribution analysis artifacts retain only approved metadata and map back to the exact evaluated checkpoint and run ID.
+
+## 10. Milestones and Acceptance Criteria
+
+### Milestone 1: Data foundation
+
+Prepared manifests, data-quality report, uncertainty mapping, and persisted patient-level splits exist. All data tests pass.
+
+### Milestone 2: Baseline
+
+The supervised 100% run completes, produces development metrics, and can be evaluated reproducibly from its checkpoint.
+
+### Milestone 3: SSL representation
+
+SimCLR pretraining completes with inspected augmentations, finite contrastive loss, saved checkpoints, and logged configuration.
+
+### Milestone 4: Label-efficiency study
+
+All methods complete for all five budgets and three seeds, or every missing run has a documented operational reason. Results are aggregated from raw metric files, not manually copied.
+
+### Milestone 5: VLM comparison and analysis
+
+The zero-shot prompt baseline and frozen VLM probes complete with versioned prompts and model provenance. Fine-tuned VLM results complete for the designated budgets if feasible. Retrieval, attribution, and error-slice analyses are tied to frozen result artifacts.
+
+### Milestone 6: Final analysis
+
+The final report includes the primary AUROC comparison, secondary metrics, confidence intervals, learning curves, limitations, and reproducibility instructions.
+
+## 11. Risks and Mitigations
+
+| Risk | Mitigation |
+| --- | --- |
+| Patient leakage inflates metrics | Persist and test patient-level splits before any model run. |
+| Uncertain labels alter conclusions | Use one declared primary mapping and report a separate sensitivity analysis only if time permits. |
+| Class imbalance hides poor minority-label performance | Report both AUROC and AUPRC per label; use weighted loss. |
+| SSL augmentations corrupt clinical features | Save and inspect paired views; keep transforms conservative. |
+| Large SimCLR batch does not fit memory | Use gradient accumulation, mixed precision, and a configured lower batch size while preserving the global-batch target where possible. |
+| Repeated validation-set tuning overfits results | Use the internal development split for all selection and evaluate the official validation manifest only after configurations are locked. |
+| Small low-budget subsets are unstable | Use fixed multi-seed patient samples and report variance, not just the best run. |
+| VLM pretrained on data overlapping CheXpert | Review the model card and pretraining documentation; disclose known or unresolved overlap and label results as transfer benchmarks, not independent generalization. |
+| Prompt wording changes zero-shot score | Pre-register a small versioned template set and tune only on the internal development split. |
+| VLM is too expensive to fine-tune | Complete zero-shot and frozen-feature probes first; use parameter-efficient fine-tuning only if it is clearly reported as such. |
+| Interpretability artifacts are over-read | Present retrievals and attributions as qualitative evidence of model behavior, never as clinical validation. |
+
+## 12. Final Deliverables
+
+1. A documented, configuration-driven training pipeline.
+2. Patient-level manifests and reproducible split files.
+3. Supervised, linear-probe, and fine-tuned SimCLR checkpoints and metric logs.
+4. Versioned VLM prompt sets, zero-shot scores, frozen-feature probes, and optional VLM fine-tuning artifacts.
+5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
+6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
+-e 
+---
+
+# Suggested Revisions to Project Plan (2-Person Team Scope)
+
+This document proposes additions and scope adjustments to the existing project plan. It is written to be merged into `context.md` as a new section, or used as a discussion basis with your teammate and professor before finalizing the plan.
+
+## 1. Add an ImageNet-pretrained baseline
+
+**Where it fits:** Section 5, "Downstream models."
+
+The current plan compares SimCLR against a supervised model trained **from random initialization**. This leaves an open question: does SimCLR's advantage come from domain-specific self-supervised pretraining, or simply from having *any* pretraining at all? Without an ImageNet baseline, the comparison is incomplete.
+
+**Proposed addition — a 4th downstream method:**
+
+4. **ImageNet-pretrained fine-tuning**: initialize the ResNet-50 from standard `torchvision` ImageNet weights, then fine-tune on the labeled subset using the same protocol as the SimCLR fine-tuning method.
+
+This requires no additional pretraining run — ImageNet weights are downloaded, not trained — so it adds negligible compute (roughly the same cost as the existing SimCLR fine-tuning runs: 15 more runs at 5 budgets × 3 seeds). It substantially strengthens the central claim of the project.
+
+**Updated experiment matrix:** 4 methods × 5 budgets × 3 seeds = 60 core downstream runs (up from 45).
+
+## 2. Formalize a pretraining screening funnel
+
+**Where it fits:** New subsection under Section 6, "Experiment Matrix," before "Recommended execution order."
+
+Rather than running the full 200-epoch pretraining schedule once with a single fixed configuration, screen a small number of cheap candidates first and document the selection process:
+
+1. Choose 2-3 pretraining variables worth testing (e.g. augmentation strength, NT-Xent temperature, whether horizontal flip is enabled). Do not vary more than this — pick variables with a real hypothesis behind them.
+2. Pretrain each candidate for a short schedule (20-40 epochs) on the full unlabeled set.
+3. Evaluate each candidate with a fast proxy: freeze the encoder, train a linear probe at one label budget (e.g. 5%) with one seed.
+4. Select the best-performing candidate and document the screening results (a small table: candidate config, dev-split AUROC) directly in the final report.
+5. Scale only the winning configuration to the full 200-epoch pretraining run.
+
+This adds an estimated 10-20 GPU-hours of screening cost, in exchange for a defensible, documented rationale for the final pretraining configuration — much cheaper than running the full 60-run downstream matrix once per candidate.
+
+## 3. Two-tier scope: core deliverable vs. stretch goal
+
+**Where it fits:** Reframe Section 10, "Milestones and Acceptance Criteria."
+
+With a 2-person team, the current plan (core matrix + full VLM track) represents a large amount of engineering and compute time. Split the plan explicitly into two tiers so the team has a clear, achievable target and an optional extension:
+
+### Core tier (target deliverable)
+- Sections 1-5 as written.
+- The screening funnel (Point 2 above).
+- The 4-method, 5-budget, 3-seed downstream matrix (60 runs, including the ImageNet baseline).
+- Full statistical reporting as in Section 7.
+- This tier alone fully answers the professor's original brief and should be treated as the primary deliverable.
+
+### Stretch tier (attempt only if core finishes with time to spare)
+- The VLM/CheXzero comparison track (zero-shot, frozen probe, fine-tuning).
+- A MoCo comparison alongside SimCLR.
+- Additional resolution or backbone ablations.
+
+Document this tiering explicitly in the plan and, ideally, confirm with the professor that the core tier alone satisfies the assignment before investing engineering time in the stretch tier.
+
+## 4. Backbone choice justification
+
+**Where it fits:** Section 5, "Shared encoder."
+
+Most CheXpert-era literature (including the original CheXpert paper) uses **DenseNet-121**, not ResNet-50. Using ResNet-50 is a reasonable choice, but it means absolute AUROC numbers won't be directly comparable to published results. Add one sentence documenting this trade-off explicitly, e.g.:
+
+> "ResNet-50 was selected for its wide framework support and interchangeability with standard ImageNet-pretrained checkpoints (needed for the ImageNet baseline, see Point 1). This means absolute performance numbers are not directly comparable to DenseNet-121-based results reported in prior CheXpert literature; only relative comparisons across our own methods are claimed."
+
+## 5. Image resolution trade-off note
+
+**Where it fits:** Section 5, "Shared encoder," input specification.
+
+224×224 is the practical default and matches ImageNet pretraining, but small pathological findings (early consolidation, small nodules) can be harder to detect at this resolution. Common CheXpert work uses 320×320 or higher. Rather than changing the default, add one sentence acknowledging the trade-off and note it as a natural extension:
+
+> "224×224 was used for compute tractability given team and hardware constraints. Higher resolution (e.g. 320×320) may improve detection of subtle findings and is left as future work."
+
+## 6. Use an experiment tracking tool
+
+**Where it fits:** Section 8, "Reproducibility and Artifact Layout."
+
+With 60+ core runs plus screening candidates, manually tracking configs and metrics in folders is error-prone — especially across two people working on possibly different machines. Add:
+
+> "All runs are logged to [Weights & Biases / MLflow], including configuration, metrics, and generated plots, in addition to the local artifact layout described below. This provides a shared, queryable view of all results across both team members."
+
+## 7. Pin the software environment
+
+**Where it fits:** Section 8, alongside "Git commit hash... hardware, and checkpoint path."
+
+Small CUDA/PyTorch version differences between two people's machines can silently produce different results from the same configuration. Add:
+
+> "A pinned `environment.yml` (or Docker image) specifying exact package versions is maintained and required for all runs. Version drift between team members' environments is treated as a reproducibility risk and checked before comparing results across machines."
+
+## 8. Early sanity check against published benchmarks
+
+**Where it fits:** New step in Section 6, "Recommended execution order," inserted after step 4 ("Train a supervised 100% baseline...").
+
+Before committing to the full label-efficiency sweep, compare the supervised 100%-labels baseline's AUROC against publicly reported CheXpert benchmark numbers for the same five observations. A large discrepancy signals a pipeline issue (label mapping, data leakage, preprocessing) that is far cheaper to catch here than after the full matrix has run.
+
+## 9. Documented fallback for reduced scope
+
+**Where it fits:** Section 11, "Risks and Mitigations" — add a new row.
+
+| Risk | Mitigation |
+| --- | --- |
+| Two-person team cannot complete the full core matrix in the available time | Pre-approved fallback, to be invoked only if needed and documented when used: reduce seeds from 3 to 2, or drop the 25% label budget tier (keeping 1%, 5%, 10%, 100%). This is a deliberate, documented scope reduction, not an unplanned shortfall. |
+
