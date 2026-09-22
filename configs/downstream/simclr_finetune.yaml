@@ -11,5 +11,6 @@ label_fraction: 0.01
 batch_size: 32
 num_workers: 4
 epochs: 50
+early_stopping_patience: 10
 learning_rate: 0.00001
 weight_decay: 0.0001

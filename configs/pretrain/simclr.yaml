@@ -9,5 +9,6 @@ batch_size: 256
 num_workers: 4
 epochs: 200
 temperature: 0.2
+horizontal_flip: false
 learning_rate: 0.0003
 weight_decay: 0.0001

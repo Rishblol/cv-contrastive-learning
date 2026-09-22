@@ -1,16 +1,16 @@
 seed: 42
 device: auto
-mode: simclr_linear
+mode: vlm_linear
+checkpoint: REPLACE_WITH_PINNED_CHEXZERO_CHECKPOINT
+revision: REPLACE_WITH_PINNED_REVISION
 train_manifest: data/processed/manifests/downstream_train.csv
 development_manifest: data/processed/manifests/development.csv
-simclr_checkpoint: outputs/pretrain/simclr-resnet50-seed42/last.pt
-output_dir: outputs/downstream/simclr-linear-1pct-seed42
-encoder: resnet50
-image_size: 224
+output_dir: outputs/vlm/chexzero-linear-1pct-seed42
 label_fraction: 0.01
-batch_size: 32
-num_workers: 4
+batch_size: 16
 epochs: 50
 early_stopping_patience: 10
 learning_rate: 0.001
 weight_decay: 0.0001
+pretraining_modality: image-text VLM
+license_review: required-before-run

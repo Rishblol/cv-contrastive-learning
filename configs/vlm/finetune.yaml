@@ -1,0 +1,17 @@
+seed: 42
+device: auto
+mode: vlm_finetune
+checkpoint: REPLACE_WITH_PINNED_CHEXZERO_CHECKPOINT
+revision: REPLACE_WITH_PINNED_REVISION
+train_manifest: data/processed/manifests/downstream_train.csv
+development_manifest: data/processed/manifests/development.csv
+output_dir: outputs/vlm/chexzero-finetune-1pct-seed42
+label_fraction: 0.01
+batch_size: 8
+epochs: 50
+early_stopping_patience: 10
+learning_rate: 0.00001
+encoder_learning_rate: 0.000001
+weight_decay: 0.0001
+pretraining_modality: image-text VLM
+license_review: required-before-run

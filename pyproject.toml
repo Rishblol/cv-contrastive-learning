@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+vlm = ["transformers>=4.44", "safetensors>=0.4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

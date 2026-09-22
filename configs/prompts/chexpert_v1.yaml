@@ -1,0 +1,17 @@
+version: chexpert-v1
+prompts:
+  Atelectasis:
+    positive: ["chest radiograph with atelectasis", "x-ray showing pulmonary atelectasis"]
+    negative: ["chest radiograph without atelectasis", "x-ray with no pulmonary atelectasis"]
+  Cardiomegaly:
+    positive: ["chest radiograph with cardiomegaly", "x-ray showing enlarged cardiac silhouette"]
+    negative: ["chest radiograph without cardiomegaly", "x-ray with normal cardiac silhouette"]
+  Consolidation:
+    positive: ["chest radiograph with consolidation", "x-ray showing pulmonary consolidation"]
+    negative: ["chest radiograph without consolidation", "x-ray with no pulmonary consolidation"]
+  Edema:
+    positive: ["chest radiograph with pulmonary edema", "x-ray showing edema"]
+    negative: ["chest radiograph without pulmonary edema", "x-ray with no edema"]
+  Pleural Effusion:
+    positive: ["chest radiograph with pleural effusion", "x-ray showing pleural fluid"]
+    negative: ["chest radiograph without pleural effusion", "x-ray with no pleural effusion"]

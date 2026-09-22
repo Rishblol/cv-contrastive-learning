@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -13,9 +14,9 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from chexpert_ssl.data import CheXpertDataset, TARGETS, sample_patient_budget, supervised_transform, target_columns
-from chexpert_ssl.metrics import multilabel_metrics
+from chexpert_ssl.metrics import multilabel_metrics, select_thresholds
 from chexpert_ssl.models import MultiLabelClassifier
-from chexpert_ssl.utils import device_from_config, load_config, save_json, seed_everything
+from chexpert_ssl.utils import device_from_config, load_config, save_json, save_run_metadata, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,14 +26,14 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.inference_mode()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def predict(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     all_targets, all_probabilities = [], []
     for images, targets in loader:
         logits = model(images.to(device, non_blocking=True))
         all_targets.append(targets.numpy())
         all_probabilities.append(torch.sigmoid(logits).cpu().numpy())
-    return multilabel_metrics(np.concatenate(all_targets), np.concatenate(all_probabilities))
+    return np.concatenate(all_targets), np.concatenate(all_probabilities)
 
 
 def positive_weights(frame: pd.DataFrame) -> torch.Tensor:
@@ -48,10 +49,16 @@ def main() -> None:
     device = device_from_config(config.get("device", "auto"))
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    save_run_metadata(output_dir, config)
 
     train_frame = pd.read_csv(config["train_manifest"])
     dev_frame = pd.read_csv(config["development_manifest"])
-    train_frame = sample_patient_budget(train_frame, float(config["label_fraction"]), int(config["seed"]))
+    if config.get("sampled_patients"):
+        with Path(config["sampled_patients"]).open("r", encoding="utf-8") as handle:
+            patient_ids = set(str(value) for value in json.load(handle)["patient_ids"])
+        train_frame = train_frame.loc[train_frame["patient_id"].astype(str).isin(patient_ids)].copy()
+    else:
+        train_frame = sample_patient_budget(train_frame, float(config["label_fraction"]), int(config["seed"]))
     image_size = int(config["image_size"])
     train_loader = DataLoader(
         CheXpertDataset(train_frame, supervised_transform(image_size, train=True)),
@@ -87,6 +94,8 @@ def main() -> None:
     criterion = nn.BCEWithLogitsLoss(pos_weight=positive_weights(train_frame).to(device))
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     best_score = float("-inf")
+    best_epoch = 0
+    patience = int(config.get("early_stopping_patience", 10))
     history: list[dict[str, float]] = []
 
     for epoch in range(1, int(config["epochs"]) + 1):
@@ -101,18 +110,23 @@ def main() -> None:
             scaler.step(optimizer)
             scaler.update()
             loss_sum += loss.item()
-        metrics = evaluate(model, dev_loader, device)
+        dev_targets, dev_probabilities = predict(model, dev_loader, device)
+        metrics = multilabel_metrics(dev_targets, dev_probabilities)
         metrics.update({"epoch": epoch, "train_loss": loss_sum / max(1, len(train_loader))})
         history.append(metrics)
         score = metrics["macro_auroc"]
         print(f"epoch={epoch} train_loss={metrics['train_loss']:.4f} dev_auroc={score:.4f}")
         if np.isfinite(score) and score > best_score:
             best_score = score
+            best_epoch = epoch
             torch.save({"model": model.state_dict(), "config": config, "epoch": epoch}, output_dir / "best.pt")
+            save_json(output_dir / "thresholds.json", select_thresholds(dev_targets, dev_probabilities))
+        if epoch - best_epoch >= patience:
+            break
 
     save_json(
         output_dir / "metrics.json",
-        {"mode": mode, "label_fraction": config["label_fraction"], "history": history, "best_dev_auroc": best_score},
+        {"mode": mode, "label_fraction": config["label_fraction"], "history": history, "best_dev_auroc": best_score, "best_epoch": best_epoch, "positive_weights": positive_weights(train_frame).tolist()},
     )
     train_frame[["patient_id"]].drop_duplicates().to_csv(output_dir / "sampled_patients.csv", index=False)
 

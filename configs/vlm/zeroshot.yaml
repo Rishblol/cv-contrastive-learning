@@ -1,0 +1,10 @@
+device: auto
+checkpoint: REPLACE_WITH_PINNED_CHEXZERO_CHECKPOINT
+revision: REPLACE_WITH_PINNED_REVISION
+manifest: data/processed/manifests/development.csv
+prompt_set: configs/prompts/chexpert_v1.yaml
+output_dir: outputs/vlm/chexzero-zeroshot-development
+batch_size: 32
+pretraining_modality: image-text VLM
+model_card_url: REPLACE_WITH_MODEL_CARD_URL
+license_review: required-before-run

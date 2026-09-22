@@ -1,9 +1,9 @@
 # Self-Supervised CheXpert Classification
 
-This repository implements the image-only core of a label-efficient chest X-ray
-classification study: SimCLR pretraining, supervised baselines, frozen linear
-probing, and SimCLR fine-tuning. The full methodology, including the planned
-CheXzero VLM extension, is in [docs/context.md](docs/context.md).
+This repository implements the full, configuration-driven study protocol in
+[docs/context.md](docs/context.md): patient-safe CheXpert preparation, SimCLR
+pretraining, supervised/linear-probe/fine-tuning comparisons, locked final
+evaluation, and an optional CheXzero-compatible VLM track.
 
 ## Setup
 
@@ -37,8 +37,40 @@ python scripts/train_downstream.py --config configs/downstream/simclr_linear.yam
 python scripts/train_downstream.py --config configs/downstream/simclr_finetune.yaml
 ```
 
-Each downstream configuration uses the same patient-level label fraction and seed.
-Change `label_fraction`, `seed`, and `output_dir` to run the full experiment matrix.
+`prepare_data.py` persists nested patient cohorts for every budget and seed in
+`data/processed/splits/`. Reference the appropriate JSON through
+`sampled_patients` in each downstream/VLM config so every method uses identical
+patients. The initial fixed seeds are 42, 43, and 44; budgets are 1%, 5%, 10%,
+25%, and 100%.
+
+## Locked final evaluation and reporting
+
+After selecting a configuration exclusively on the development split, point
+`configs/evaluation/final_validation.yaml` at its checkpoint and thresholds:
+
+```powershell
+python scripts/evaluate_checkpoint.py --config configs/evaluation/final_validation.yaml
+python scripts/aggregate_results.py
+python scripts/analyze_errors.py --predictions outputs/reports/.../predictions.csv --thresholds outputs/downstream/.../thresholds.json --run-id RUN_ID --output outputs/analysis/RUN_ID/errors.csv
+```
+
+This is the only command path intended to read the official validation manifest.
+
+## Optional VLM extension
+
+Install the optional dependencies, review and pin a CheXzero-compatible model
+checkpoint/revision/license, then replace the explicit placeholders in
+`configs/vlm/`. Prompts are versioned in `configs/prompts/chexpert_v1.yaml`.
+
+```powershell
+pip install -e ".[vlm]"
+python scripts/evaluate_vlm_zeroshot.py --config configs/vlm/zeroshot.yaml
+python scripts/train_vlm.py --config configs/vlm/linear_probe.yaml
+python scripts/train_vlm.py --config configs/vlm/finetune.yaml
+```
+
+VLM results are always marked `image-text VLM` and must be reported separately
+from the image-only SimCLR comparison.
 
 ## Verification
 

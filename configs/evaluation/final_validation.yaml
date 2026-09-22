@@ -1,0 +1,10 @@
+device: auto
+checkpoint: outputs/downstream/REPLACE_WITH_LOCKED_RUN/best.pt
+manifest: data/processed/manifests/final_validation.csv
+thresholds: outputs/downstream/REPLACE_WITH_LOCKED_RUN/thresholds.json
+output_dir: outputs/reports/final-validation-REPLACE_WITH_LOCKED_RUN
+encoder: resnet50
+image_size: 224
+batch_size: 64
+seed: 42
+bootstrap_samples: 1000

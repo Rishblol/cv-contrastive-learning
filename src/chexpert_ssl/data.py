@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -91,7 +92,12 @@ def assert_patient_disjoint(*frames: pd.DataFrame) -> None:
 
 
 def split_by_patient(frame: pd.DataFrame, dev_fraction: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Create a deterministic patient-disjoint development partition."""
+    """Create a deterministic patient-disjoint development partition.
+
+    Patients are assigned using a shuffled order, rather than individual studies,
+    so the split remains safe even when a patient has multiple studies or views.
+    Pre/post-split prevalence is recorded by ``prepare_data.py``.
+    """
     if not 0 < dev_fraction < 1:
         raise ValueError("dev_fraction must be between 0 and 1")
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
@@ -115,6 +121,27 @@ def sample_patient_budget(frame: pd.DataFrame, fraction: float, seed: int) -> pd
     count = max(1, int(round(len(patients) * fraction)))
     chosen = set(patients[:count])
     return frame.loc[frame["patient_id"].astype(str).isin(chosen)].reset_index(drop=True)
+
+
+def nested_patient_ids(frame: pd.DataFrame, fractions: Iterable[float], seed: int) -> dict[float, list[str]]:
+    """Return nested deterministic patient samples for every requested budget."""
+    patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
+    rng = np.random.default_rng(seed)
+    rng.shuffle(patients)
+    result: dict[float, list[str]] = {}
+    for fraction in sorted(set(float(value) for value in fractions)):
+        if not 0 < fraction <= 1:
+            raise ValueError("All fractions must be in (0, 1]")
+        count = max(1, int(round(len(patients) * fraction)))
+        result[fraction] = patients[:count].tolist()
+    return result
+
+
+def manifest_hash(frame: pd.DataFrame) -> str:
+    """Stable content hash used to tie artifacts back to their source manifest."""
+    columns = [column for column in ("Path", "image_path", "patient_id", *target_columns()) if column in frame]
+    payload = frame[columns].sort_values(columns).to_csv(index=False).encode("utf-8")
+    return sha256(payload).hexdigest()
 
 
 def target_columns() -> list[str]:
@@ -172,21 +199,41 @@ def supervised_transform(image_size: int, train: bool) -> transforms.Compose:
     return transforms.Compose(operations)
 
 
-def simclr_transform(image_size: int) -> transforms.Compose:
+def simclr_transform(image_size: int, horizontal_flip: bool = False) -> transforms.Compose:
     """Conservative radiograph augmentation policy; no hue/saturation or flip."""
-    return transforms.Compose(
-        [
+    operations: list[Callable] = [
             transforms.RandomResizedCrop(image_size, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
             transforms.RandomAffine(degrees=5, translate=(0.03, 0.03)),
             transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15)], p=0.8),
             transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
-        ]
-    )
+    ]
+    if horizontal_flip:
+        operations.insert(2, transforms.RandomHorizontalFlip())
+    return transforms.Compose(operations)
 
 
 def existing_images(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return readable-path candidates and a report frame for missing paths."""
-    exists = frame["image_path"].map(lambda value: Path(value).is_file())
-    return frame.loc[exists].reset_index(drop=True), frame.loc[~exists].reset_index(drop=True)
+    """Return decodable images and a data-quality report for invalid records."""
+    reasons: list[str] = []
+    for value in frame["image_path"]:
+        path = Path(value)
+        if not path.is_file():
+            reasons.append("missing")
+            continue
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            reasons.append("")
+        except (OSError, ValueError):
+            reasons.append("unreadable")
+    report = frame.loc[[bool(reason) for reason in reasons]].copy()
+    report["data_quality_reason"] = [reason for reason in reasons if reason]
+    valid = frame.loc[[not bool(reason) for reason in reasons]].copy()
+    return valid.reset_index(drop=True), report.reset_index(drop=True)
+
+
+def prevalence(frame: pd.DataFrame) -> dict[str, float]:
+    """Resolved target prevalence, including zero prevalence labels."""
+    return {target: float(frame[f"target_{target}"].mean()) for target in TARGETS}
