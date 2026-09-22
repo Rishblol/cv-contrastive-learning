@@ -326,3 +326,76 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 4. Versioned VLM prompt sets, zero-shot scores, frozen-feature probes, and optional VLM fine-tuning artifacts.
 5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
 6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
+
+## 13. Implementation Status (2026-09-22)
+
+The repository now contains the first complete runnable implementation of the
+protocol. It has not yet been executed, smoke-tested, or used for a training
+run; no performance claim, checkpoint, split artifact, or final-validation
+result exists yet.
+
+### Implemented data and reproducibility foundation
+
+- `scripts/prepare_data.py` prepares portable manifests, resolves the declared
+  U-Ones/U-Zeros targets, verifies that images exist and can be decoded, and
+  emits missing/unreadable-image reports.
+- It creates a deterministic patient-level train/development split, writes the
+  patient IDs for train, development, and official validation, and records
+  target prevalence plus content hashes for every generated manifest.
+- It also writes nested patient-ID JSON cohorts for label fractions `0.01`,
+  `0.05`, `0.10`, `0.25`, and `1.0`, using seeds `42`, `43`, and `44`. The
+  current patient split is deterministic shuffled assignment rather than
+  iterative multi-label stratification; prevalence reporting documents the
+  resulting distribution.
+- Each training/evaluation output receives `run_metadata.json` with the full
+  configuration, command, Git revision, Python/PyTorch versions, CUDA status,
+  hardware identifier, and timestamp.
+
+### Implemented image-only experiments
+
+- `scripts/train_pretrain.py` trains the ResNet SimCLR model, writes conservative
+  two-view augmentation samples, and saves `best.pt`, `last.pt`, and loss
+  history. Horizontal flip is explicitly configurable and disabled by default.
+- `scripts/train_downstream.py` supports `supervised`, `simclr_linear`, and
+  `simclr_finetune` modes, accepts persisted sampled-patient JSON files, uses
+  subset-specific positive weights, selects checkpoints by development macro
+  AUROC, applies early stopping, and persists development-selected thresholds.
+- `scripts/evaluate_checkpoint.py` is the explicit locked-configuration path
+  for the official validation manifest. It writes metrics, per-image
+  probabilities, threshold metrics, and a patient-resampled macro-AUROC CI.
+  It must not be used before configuration selection is complete.
+
+### Implemented VLM extension
+
+- The optional `vlm` dependency group supplies a Hugging Face adapter for
+  CLIP-compatible radiology checkpoints. All supplied VLM configs intentionally
+  contain required checkpoint, revision, and model-card placeholders.
+- `configs/prompts/chexpert_v1.yaml` versions paired positive/negative templates
+  for all five observations. `scripts/evaluate_vlm_zeroshot.py` averages
+  normalized template embeddings and uses a two-class image-text softmax score
+  without labels at inference.
+- `scripts/train_vlm.py` supports frozen feature probes and image-encoder
+  fine-tuning. Fine-tuning uses a separately configurable, lower encoder
+  learning rate. VLM configs record the `image-text VLM` modality and require
+  license review before use.
+
+### Implemented reporting and analysis support
+
+- `scripts/aggregate_results.py` produces raw-metric and seed-summary CSVs from
+  run artifacts, retaining method and pretraining-modality columns.
+- `scripts/analyze_errors.py` creates an editable false-positive/false-negative
+  worksheet containing the run, image/patient/study IDs, label, prediction,
+  threshold, view, attribution placeholder, and reviewer-observation field.
+
+### Deferred implementation and operational requirements
+
+- Gradient accumulation, warmup, LARS, iterative multilabel stratification,
+  run-duration/peak-memory logging, final-AUROC paired-difference bootstrap,
+  calibration, plot generation, retrieval, UMAP/t-SNE, and Grad-CAM are not
+  implemented yet.
+- The existing unit tests cover uncertainty conversion, patient-overlap checks,
+  patient budgets, NT-Xent finiteness, and basic multi-label metrics. The
+  remaining checks in Section 9 still need implementation.
+- Before any expensive run, inspect `augmentation_pairs.png`, execute the test
+  suite and smoke runs, review VLM provenance/license/overlap risk, and lock a
+  configuration on the development split before calling final evaluation.
