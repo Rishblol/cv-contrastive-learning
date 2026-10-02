@@ -77,7 +77,10 @@ def main() -> None:
 
     mode = config["mode"]
     model = MultiLabelClassifier(
-        config.get("encoder", "resnet50"), len(TARGETS), freeze_encoder=mode == "simclr_linear"
+        config.get("encoder", "resnet50"),
+        len(TARGETS),
+        freeze_encoder=mode == "simclr_linear",
+        pretrained=bool(config.get("imagenet_pretrained", False)),
     )
     if mode in {"simclr_linear", "simclr_finetune"}:
         checkpoint = torch.load(config["simclr_checkpoint"], map_location="cpu", weights_only=False)
@@ -97,8 +100,19 @@ def main() -> None:
     best_epoch = 0
     patience = int(config.get("early_stopping_patience", 10))
     history: list[dict[str, float]] = []
+    start_epoch = 1
+    resume_path = output_dir / "last.pt"
+    if bool(config.get("resume", True)) and resume_path.is_file():
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scaler.load_state_dict(checkpoint["scaler"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_score = float(checkpoint["best_score"])
+        best_epoch = int(checkpoint["best_epoch"])
+        history = checkpoint["history"]
 
-    for epoch in range(1, int(config["epochs"]) + 1):
+    for epoch in range(start_epoch, int(config["epochs"]) + 1):
         model.train()
         loss_sum = 0.0
         for images, targets in train_loader:
@@ -121,6 +135,19 @@ def main() -> None:
             best_epoch = epoch
             torch.save({"model": model.state_dict(), "config": config, "epoch": epoch}, output_dir / "best.pt")
             save_json(output_dir / "thresholds.json", select_thresholds(dev_targets, dev_probabilities))
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),
+                "config": config,
+                "epoch": epoch,
+                "best_score": best_score,
+                "best_epoch": best_epoch,
+                "history": history,
+            },
+            resume_path,
+        )
         if epoch - best_epoch >= patience:
             break
 

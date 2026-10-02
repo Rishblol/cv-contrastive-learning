@@ -58,7 +58,7 @@ Does SimCLR pretraining on unlabeled CheXpert radiographs improve downstream mul
 3. Keep the source image path, patient ID, study ID, view, and the five selected labels in a prepared manifest.
 4. Exclude records whose image path is missing or unreadable, and log the count and paths in a data-quality report.
 5. Keep all available image views for pretraining. For downstream experiments, begin with frontal images (`AP` and `PA`) only because they are the most directly comparable; record the filtering count.
-6. Convert grayscale images to three identical channels to use an ImageNet-style ResNet-50 implementation without changing its input interface.
+6. Convert grayscale images to three identical channels for the shared three-channel backbone interface.
 
 ### Target encoding and uncertainty policy
 
@@ -88,12 +88,18 @@ This mapping must be implemented in one reusable preprocessing function and reco
 
 ### Shared encoder
 
-- Backbone: ResNet-50, initialized randomly for SimCLR and supervised-from-scratch baselines.
-- Input: normalized 3-channel 224 x 224 X-rays.
-- Feature representation: the global-average-pooled ResNet feature vector.
-- Classification head: one linear layer producing five independent logits.
+Compare five interchangeable backbones: ResNet-18, ResNet-50, DenseNet-121,
+EfficientNet-B0, and ViT-B/16. All receive normalized three-channel X-rays and
+return one feature vector per image; a shared linear head produces five logits.
+Convolutional backbones use their pooled feature representation. ViT-B/16 uses
+its class-token representation. All are randomly initialized for the primary
+image-only comparison; ImageNet initialization is a separate configurable
+experiment and must be reported distinctly.
 
-The encoder implementation should remain interchangeable so a smaller ResNet can be used for smoke tests without changing the training or evaluation interface.
+Use the same architecture set across the supervised-from-scratch, SimCLR linear
+probe, and SimCLR fine-tuning methods. Image resolution and architecture are
+configuration values, and each run records its backbone so metrics can be
+compared by architecture and method.
 
 ### SimCLR pretraining
 
@@ -121,9 +127,9 @@ The project should save example pairs of augmented views before launching full t
 
 Train three methods with identical data splits, input resolution, label mappings, and evaluation code:
 
-1. **Supervised from scratch**: random ResNet-50 plus classification head, trained only on the chosen labeled subset.
-2. **SimCLR linear probe**: freeze the pretrained encoder and train only the five-logit classification head.
-3. **SimCLR fine-tuning**: initialize from the pretrained encoder, then optimize the encoder and classification head together on the labeled subset.
+1. **Supervised from scratch**: randomly initialized selected backbone plus classification head, trained only on the chosen labeled subset.
+2. **SimCLR linear probe**: freeze the selected SimCLR-pretrained backbone and train only the five-logit classification head.
+3. **SimCLR fine-tuning**: initialize the selected backbone from its SimCLR checkpoint, then optimize the encoder and classification head together on the labeled subset.
 
 Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labeled training subset. Store the weights in the run metadata. Optimize AUROC-oriented model selection with the development set; do not select checkpoints from the official validation set.
 
@@ -191,7 +197,7 @@ These are starting points, not results to tune against the official validation s
 | Component | Initial configuration |
 | --- | --- |
 | Image size | 224 x 224 |
-| SSL backbone | ResNet-50 |
+| SSL backbones | ResNet-18, ResNet-50, DenseNet-121, EfficientNet-B0, ViT-B/16 |
 | SSL epochs | 200 |
 | SSL temperature | 0.1 to 0.2, selected on development protocol |
 | SSL effective batch size | 256+ with gradient accumulation if required |
@@ -327,12 +333,12 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
 6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
 
-## 13. Implementation Status (2026-09-22)
+## 13. Implementation Status (2026-10-02)
 
-The repository now contains the first complete runnable implementation of the
-protocol. It has not yet been executed, smoke-tested, or used for a training
-run; no performance claim, checkpoint, split artifact, or final-validation
-result exists yet.
+The repository contains the configured data and training pipeline. The image-only
+training pipeline and Colab notebook have not yet been run end to end; no
+performance claim, checkpoint, split artifact, or final-validation result is
+implied by code presence alone.
 
 ### Implemented data and reproducibility foundation
 
@@ -353,7 +359,7 @@ result exists yet.
 
 ### Implemented image-only experiments
 
-- `scripts/train_pretrain.py` trains the ResNet SimCLR model, writes conservative
+- `scripts/train_pretrain.py` trains the selected backbone with SimCLR, writes conservative
   two-view augmentation samples, and saves `best.pt`, `last.pt`, and loss
   history. Horizontal flip is explicitly configurable and disabled by default.
 - `scripts/train_downstream.py` supports `supervised`, `simclr_linear`, and
@@ -386,6 +392,24 @@ result exists yet.
 - `scripts/analyze_errors.py` creates an editable false-positive/false-negative
   worksheet containing the run, image/patient/study IDs, label, prediction,
   threshold, view, attribution placeholder, and reviewer-observation field.
+
+### Architecture comparison and Colab workflow
+
+- `configs/models/backbones.yaml` declares the shared comparison set:
+  ResNet-18, ResNet-50, DenseNet-121, EfficientNet-B0, and ViT-B/16.
+- The encoder factory removes each classifier head and returns a fixed feature
+  vector interface used by SimCLR and the five-logit downstream classifier.
+  ViT-B/16 contributes its class-token feature vector.
+- The three image-only downstream methods run with the same architecture set,
+  persisted patient cohorts, label budgets, and seeds. Aggregated metrics retain
+  the architecture as a separate comparison field.
+- `notebooks/chexpert_pipeline_colab.ipynb` mounts Drive, installs the project,
+  prepares the data, runs either a short smoke profile or the full matrix, and
+  aggregates results. It leaves final validation as a separate locked step.
+- Full matrix training on Colab may span sessions. The notebook writes configs,
+  checkpoints, manifests, and results under the Drive-hosted repository. Runs
+  with completed metrics are skipped when the training cell is rerun. Interrupted
+  image-only training resumes from the latest epoch checkpoint when available.
 
 ### Deferred implementation and operational requirements
 

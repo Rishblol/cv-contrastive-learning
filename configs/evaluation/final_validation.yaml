@@ -4,6 +4,7 @@ manifest: data/processed/manifests/final_validation.csv
 thresholds: outputs/downstream/REPLACE_WITH_LOCKED_RUN/thresholds.json
 output_dir: outputs/reports/final-validation-REPLACE_WITH_LOCKED_RUN
 encoder: resnet50
+imagenet_pretrained: false
 image_size: 224
 batch_size: 64
 seed: 42

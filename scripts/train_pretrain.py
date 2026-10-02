@@ -52,14 +52,29 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         drop_last=True,
     )
-    model = SimCLRModel(config.get("encoder", "resnet50"), int(config.get("projection_dim", 128))).to(device)
+    model = SimCLRModel(
+        config.get("encoder", "resnet50"),
+        int(config.get("projection_dim", 128)),
+        pretrained=bool(config.get("imagenet_pretrained", False)),
+    ).to(device)
     optimizer = AdamW(model.parameters(), lr=float(config["learning_rate"]), weight_decay=float(config["weight_decay"]))
     scheduler = CosineAnnealingLR(optimizer, T_max=int(config["epochs"]))
-    best_loss = float("inf")
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    start_epoch = 1
+    best_loss = float("inf")
     history: list[dict[str, float]] = []
+    resume_path = output_dir / "last.pt"
+    if bool(config.get("resume", True)) and resume_path.is_file():
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        scaler.load_state_dict(checkpoint["scaler"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_loss = float(checkpoint["best_loss"])
+        history = checkpoint["history"]
 
-    for epoch in range(1, int(config["epochs"]) + 1):
+    for epoch in range(start_epoch, int(config["epochs"]) + 1):
         model.train()
         total_loss = 0.0
         for first, second in loader:
@@ -75,10 +90,22 @@ def main() -> None:
         mean_loss = total_loss / max(1, len(loader))
         history.append({"epoch": epoch, "train_loss": mean_loss, "learning_rate": scheduler.get_last_lr()[0]})
         print(f"epoch={epoch} train_loss={mean_loss:.4f}")
-        torch.save({"model": model.state_dict(), "config": config, "epoch": epoch}, output_dir / "last.pt")
         if mean_loss < best_loss:
             best_loss = mean_loss
             torch.save({"model": model.state_dict(), "config": config, "epoch": epoch}, output_dir / "best.pt")
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
+                "config": config,
+                "epoch": epoch,
+                "best_loss": best_loss,
+                "history": history,
+            },
+            resume_path,
+        )
 
     save_json(output_dir / "metrics.json", {"history": history, "device": str(device)})
 

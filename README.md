@@ -16,6 +16,24 @@ pip install -e ".[dev]"
 Use Python 3.10-3.13. The active local Python 3.14 environment does not currently
 have the required PyTorch package installed.
 
+## Google Colab
+
+Open `notebooks/chexpert_pipeline_colab.ipynb` in Colab. The notebook mounts
+Google Drive, installs this project, checks the CUDA runtime and dataset layout,
+then runs preparation, the architecture and training-method matrix, and metric
+aggregation. Place the extracted dataset on Drive with `train.csv`, `valid.csv`,
+`train/`, and `valid/` under one dataset directory. Keep the repository, prepared
+manifests, checkpoints, and outputs on Drive so they persist between sessions.
+
+The shared image-only backbone set is ResNet-18, ResNet-50, DenseNet-121,
+EfficientNet-B0, and ViT-B/16. Every backbone uses the same input interface and
+five-label head. The notebook exposes a short smoke profile and the full
+configured matrix; ViT-B/16 and full SimCLR schedules require substantial GPU
+time and memory. Reduce the configured batch size if a Colab GPU runs out of
+memory; ViT-B/16 expects the shared 224 x 224 input size. Experiment choices are listed in
+`configs/models/backbones.yaml` and run-specific resolved configurations are
+saved with each output.
+
 ## Prepare manifests
 
 This reads the bundled dataset, applies the declared CheXpert uncertainty policy,
@@ -78,6 +96,8 @@ from the image-only SimCLR comparison.
 pytest
 ```
 
-The current implementation covers the reproducible image-only core. The next
-implementation stage adds CheXzero checkpoint loading, versioned prompt scoring,
-and VLM feature probes without changing the dataset or metric interfaces.
+The implementation includes the image-only core and optional VLM tooling. VLM
+configs contain placeholders and require checkpoint, revision, source, and
+license review before use. Run focused tests before a full training run, inspect
+the saved SimCLR augmentation pairs, and select settings on the development
+partition before locked final evaluation.

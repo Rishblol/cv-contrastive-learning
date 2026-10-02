@@ -6,6 +6,7 @@ development_manifest: data/processed/manifests/development.csv
 simclr_checkpoint: outputs/pretrain/simclr-resnet50-seed42/last.pt
 output_dir: outputs/downstream/simclr-finetune-1pct-seed42
 encoder: resnet50
+imagenet_pretrained: false
 image_size: 224
 label_fraction: 0.01
 batch_size: 32
@@ -14,3 +15,4 @@ epochs: 50
 early_stopping_patience: 10
 learning_rate: 0.00001
 weight_decay: 0.0001
+resume: true

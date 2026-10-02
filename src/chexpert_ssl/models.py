@@ -4,27 +4,43 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import ResNet18_Weights, ResNet50_Weights, resnet18, resnet50
+from torchvision import models as vision_models
 
 
 def build_encoder(name: str = "resnet50", pretrained: bool = False) -> tuple[nn.Module, int]:
-    """Return a ResNet feature encoder without its ImageNet classification layer."""
-    if name == "resnet18":
-        model = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
+    """Return a supported torchvision backbone that emits one feature vector per image."""
+    constructors = {
+        "resnet18": (vision_models.resnet18, vision_models.ResNet18_Weights),
+        "resnet50": (vision_models.resnet50, vision_models.ResNet50_Weights),
+        "densenet121": (vision_models.densenet121, vision_models.DenseNet121_Weights),
+        "efficientnet_b0": (vision_models.efficientnet_b0, vision_models.EfficientNet_B0_Weights),
+        "vit_b_16": (vision_models.vit_b_16, vision_models.ViT_B_16_Weights),
+    }
+    if name not in constructors:
+        supported = ", ".join(constructors)
+        raise ValueError(f"Unsupported encoder {name!r}; choose one of: {supported}")
+
+    constructor, weight_enum = constructors[name]
+    model = constructor(weights=weight_enum.DEFAULT if pretrained else None)
+    if name.startswith("resnet"):
         features = model.fc.in_features
-    elif name == "resnet50":
-        model = resnet50(weights=ResNet50_Weights.DEFAULT if pretrained else None)
-        features = model.fc.in_features
+        model.fc = nn.Identity()
+    elif name == "densenet121":
+        features = model.classifier.in_features
+        model.classifier = nn.Identity()
+    elif name == "efficientnet_b0":
+        features = model.classifier[-1].in_features
+        model.classifier[-1] = nn.Identity()
     else:
-        raise ValueError(f"Unsupported encoder {name!r}; use resnet18 or resnet50")
-    model.fc = nn.Identity()
+        features = model.heads.head.in_features
+        model.heads = nn.Identity()
     return model, features
 
 
 class SimCLRModel(nn.Module):
-    def __init__(self, encoder_name: str, projection_dim: int = 128) -> None:
+    def __init__(self, encoder_name: str, projection_dim: int = 128, pretrained: bool = False) -> None:
         super().__init__()
-        self.encoder, feature_dim = build_encoder(encoder_name)
+        self.encoder, feature_dim = build_encoder(encoder_name, pretrained=pretrained)
         self.projector = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.ReLU(inplace=True),
@@ -36,9 +52,15 @@ class SimCLRModel(nn.Module):
 
 
 class MultiLabelClassifier(nn.Module):
-    def __init__(self, encoder_name: str, num_labels: int, freeze_encoder: bool = False) -> None:
+    def __init__(
+        self,
+        encoder_name: str,
+        num_labels: int,
+        freeze_encoder: bool = False,
+        pretrained: bool = False,
+    ) -> None:
         super().__init__()
-        self.encoder, feature_dim = build_encoder(encoder_name)
+        self.encoder, feature_dim = build_encoder(encoder_name, pretrained=pretrained)
         self.classifier = nn.Linear(feature_dim, num_labels)
         if freeze_encoder:
             self.freeze_encoder()

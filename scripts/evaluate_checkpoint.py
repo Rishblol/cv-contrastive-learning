@@ -26,7 +26,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     save_run_metadata(output_dir, config)
     checkpoint = torch.load(config["checkpoint"], map_location="cpu", weights_only=False)
-    model = MultiLabelClassifier(config.get("encoder", "resnet50"), len(TARGETS))
+    model = MultiLabelClassifier(
+        config.get("encoder", "resnet50"),
+        len(TARGETS),
+        pretrained=bool(config.get("imagenet_pretrained", False)),
+    )
     model.load_state_dict(checkpoint["model"])
     model.to(device).eval()
     frame = pd.read_csv(config["manifest"])

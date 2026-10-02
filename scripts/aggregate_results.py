@@ -25,12 +25,22 @@ def main() -> None:
         config = metadata.get("config", {})
         if "best_dev_auroc" not in payload and "macro_auroc" not in payload:
             continue
+        mode = payload.get("mode", config.get("mode", "unknown"))
+        imagenet_pretrained = bool(config.get("imagenet_pretrained", False))
+        if imagenet_pretrained:
+            modality = "ImageNet + image-only SSL" if "simclr" in str(mode) else "ImageNet"
+        else:
+            modality = config.get(
+                "pretraining_modality",
+                "image-only SSL" if "simclr" in str(mode) else "none",
+            )
         rows.append({
             "run_id": path.parent.name,
-            "method": payload.get("mode", config.get("mode", "unknown")),
+            "method": mode,
+            "architecture": config.get("encoder", "unknown"),
             "label_fraction": payload.get("label_fraction", config.get("label_fraction")),
             "seed": config.get("seed"),
-            "pretraining_modality": config.get("pretraining_modality", "image-only SSL" if "simclr" in str(config.get("mode", "")) else "none"),
+            "pretraining_modality": modality,
             "macro_auroc": payload.get("macro_auroc", payload.get("best_dev_auroc")),
             "macro_auprc": payload.get("macro_auprc"),
             "metrics_path": str(path),
@@ -40,7 +50,7 @@ def main() -> None:
     raw.to_csv(args.output_dir / "raw_metrics.csv", index=False)
     if raw.empty:
         return
-    summary = raw.groupby(["method", "pretraining_modality", "label_fraction"], dropna=False).agg(
+    summary = raw.groupby(["architecture", "method", "pretraining_modality", "label_fraction"], dropna=False).agg(
         macro_auroc_mean=("macro_auroc", "mean"), macro_auroc_std=("macro_auroc", "std"),
         macro_auprc_mean=("macro_auprc", "mean"), macro_auprc_std=("macro_auprc", "std"), runs=("run_id", "count")
     ).reset_index()

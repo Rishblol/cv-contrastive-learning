@@ -3,6 +3,7 @@ device: auto
 manifest: data/processed/manifests/pretrain_train.csv
 output_dir: outputs/pretrain/simclr-resnet50-seed42
 encoder: resnet50
+imagenet_pretrained: false
 image_size: 224
 projection_dim: 128
 batch_size: 256
@@ -12,3 +13,4 @@ temperature: 0.2
 horizontal_flip: false
 learning_rate: 0.0003
 weight_decay: 0.0001
+resume: true
