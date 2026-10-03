@@ -16,23 +16,13 @@ pip install -e ".[dev]"
 Use Python 3.10-3.13. The active local Python 3.14 environment does not currently
 have the required PyTorch package installed.
 
-## Google Colab
-
-Open `notebooks/chexpert_pipeline_colab.ipynb` in Colab. The notebook mounts
-Google Drive, installs this project, checks the CUDA runtime and dataset layout,
-then runs preparation, the architecture and training-method matrix, and metric
-aggregation. Place the extracted dataset on Drive with `train.csv`, `valid.csv`,
-`train/`, and `valid/` under one dataset directory. Keep the repository, prepared
-manifests, checkpoints, and outputs on Drive so they persist between sessions.
+## Model comparison
 
 The shared image-only backbone set is ResNet-18, ResNet-50, DenseNet-121,
 EfficientNet-B0, and ViT-B/16. Every backbone uses the same input interface and
-five-label head. The notebook exposes a short smoke profile and the full
-configured matrix; ViT-B/16 and full SimCLR schedules require substantial GPU
-time and memory. Reduce the configured batch size if a Colab GPU runs out of
-memory; ViT-B/16 expects the shared 224 x 224 input size. Experiment choices are listed in
-`configs/models/backbones.yaml` and run-specific resolved configurations are
-saved with each output.
+five-label head. Experiment choices are listed in
+`configs/models/backbones.yaml`; run-specific resolved configurations are saved
+with each output. ViT-B/16 expects the shared 224 x 224 input size.
 
 ## Prepare manifests
 

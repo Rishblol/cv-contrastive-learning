@@ -336,9 +336,9 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 ## 13. Implementation Status (2026-10-02)
 
 The repository contains the configured data and training pipeline. The image-only
-training pipeline and Colab notebook have not yet been run end to end; no
-performance claim, checkpoint, split artifact, or final-validation result is
-implied by code presence alone.
+training pipeline has not yet been run end to end; no performance claim,
+checkpoint, split artifact, or final-validation result is implied by code
+presence alone.
 
 ### Implemented data and reproducibility foundation
 
@@ -393,7 +393,7 @@ implied by code presence alone.
   worksheet containing the run, image/patient/study IDs, label, prediction,
   threshold, view, attribution placeholder, and reviewer-observation field.
 
-### Architecture comparison and Colab workflow
+### Architecture comparison
 
 - `configs/models/backbones.yaml` declares the shared comparison set:
   ResNet-18, ResNet-50, DenseNet-121, EfficientNet-B0, and ViT-B/16.
@@ -403,13 +403,8 @@ implied by code presence alone.
 - The three image-only downstream methods run with the same architecture set,
   persisted patient cohorts, label budgets, and seeds. Aggregated metrics retain
   the architecture as a separate comparison field.
-- `notebooks/chexpert_pipeline_colab.ipynb` mounts Drive, installs the project,
-  prepares the data, runs either a short smoke profile or the full matrix, and
-  aggregates results. It leaves final validation as a separate locked step.
-- Full matrix training on Colab may span sessions. The notebook writes configs,
-  checkpoints, manifests, and results under the Drive-hosted repository. Runs
-  with completed metrics are skipped when the training cell is rerun. Interrupted
-  image-only training resumes from the latest epoch checkpoint when available.
+- Image-only training resumes from the latest epoch checkpoint when available,
+  allowing long runs to continue after an interruption.
 
 ### Deferred implementation and operational requirements
 

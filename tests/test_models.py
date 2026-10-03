@@ -21,12 +21,13 @@ from chexpert_ssl.models import MultiLabelClassifier, build_encoder
 def test_backbone_feature_interface(name: str, feature_dim: int) -> None:
     encoder, actual_dim = build_encoder(name)
     encoder.eval()
+    classifier = torch.nn.Linear(feature_dim, 5)
     with torch.inference_mode():
         features = encoder(torch.zeros(1, 3, 224, 224))
+        logits = classifier(features)
     assert actual_dim == feature_dim
     assert features.shape == (1, feature_dim)
-    classifier = torch.nn.Linear(feature_dim, 5)
-    assert classifier(features).shape == (1, 5)
+    assert logits.shape == (1, 5)
     del encoder, classifier, features
     gc.collect()
 
