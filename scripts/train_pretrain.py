@@ -39,7 +39,7 @@ def main() -> None:
     samples = [dataset[index] for index in range(min(8, len(dataset)))]
     if samples:
         save_image(
-            torch.cat([item for pair in samples for item in pair]),
+            torch.stack([item for pair in samples for item in pair]),
             output_dir / "augmentation_pairs.png",
             normalize=True,
             nrow=2,
