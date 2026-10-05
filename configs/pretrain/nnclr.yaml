@@ -1,0 +1,18 @@
+seed: 42
+device: auto
+method: nnclr
+manifest: data/processed/manifests/pretrain_train.csv
+output_dir: outputs/pretrain/nnclr-resnet18-seed42
+encoder: resnet18
+image_size: 128
+batch_size: 16
+num_workers: 4
+epochs: 30
+learning_rate: 0.0003
+weight_decay: 0.0001
+resume: true
+ssl:
+  hidden_dim: 512
+  projection_dim: 128
+  temperatures: {nnclr: 0.1}
+  queue_size: 8192

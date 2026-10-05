@@ -26,17 +26,20 @@ def main() -> None:
         if "best_dev_auroc" not in payload and "macro_auroc" not in payload:
             continue
         mode = payload.get("mode", config.get("mode", "unknown"))
+        ssl_method = payload.get("ssl_method", config.get("ssl_method"))
+        method = f"{ssl_method}_{mode}" if ssl_method else mode
         imagenet_pretrained = bool(config.get("imagenet_pretrained", False))
         if imagenet_pretrained:
-            modality = "ImageNet + image-only SSL" if "simclr" in str(mode) else "ImageNet"
+            modality = "ImageNet + image-only SSL" if ssl_method else "ImageNet"
         else:
             modality = config.get(
                 "pretraining_modality",
-                "image-only SSL" if "simclr" in str(mode) else "none",
+                "image-only SSL" if ssl_method else "none",
             )
         rows.append({
             "run_id": path.parent.name,
-            "method": mode,
+            "method": method,
+            "protocol": mode,
             "architecture": config.get("encoder", "unknown"),
             "label_fraction": payload.get("label_fraction", config.get("label_fraction")),
             "seed": config.get("seed"),

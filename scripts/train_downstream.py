@@ -43,6 +43,25 @@ def positive_weights(frame: pd.DataFrame) -> torch.Tensor:
     return torch.tensor(negatives / np.clip(positives, 1, None), dtype=torch.float32)
 
 
+def extract_features(model: MultiLabelClassifier, frame: pd.DataFrame, image_size: int,
+                     batch_size: int, workers: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    loader = DataLoader(
+        CheXpertDataset(frame, supervised_transform(image_size, train=False)),
+        batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=device.type == "cuda",
+    )
+    model.encoder.eval()
+    features, labels = [], []
+    for images, targets in loader:
+        with torch.inference_mode(), torch.autocast(
+            device_type=device.type, enabled=device.type == "cuda"
+        ):
+            features.append(model.encoder(images.to(device, non_blocking=True)).float().cpu())
+        labels.append(targets)
+    with torch.inference_mode(False):
+        train_features = torch.cat(features).clone()
+    return train_features, torch.cat(labels)
+
+
 def main() -> None:
     config = load_config(parse_args().config)
     seed_everything(int(config["seed"]))
@@ -76,17 +95,26 @@ def main() -> None:
     )
 
     mode = config["mode"]
+    is_ssl = mode in {"simclr_linear", "simclr_finetune", "ssl_linear", "ssl_finetune"}
+    linear_probe = mode in {"simclr_linear", "ssl_linear"}
     model = MultiLabelClassifier(
         config.get("encoder", "resnet50"),
         len(TARGETS),
-        freeze_encoder=mode == "simclr_linear",
+        freeze_encoder=linear_probe,
         pretrained=bool(config.get("imagenet_pretrained", False)),
     )
-    if mode in {"simclr_linear", "simclr_finetune"}:
-        checkpoint = torch.load(config["simclr_checkpoint"], map_location="cpu", weights_only=False)
-        model.load_simclr_encoder(checkpoint)
+    if is_ssl:
+        checkpoint_path = config.get("ssl_checkpoint", config.get("simclr_checkpoint"))
+        if not checkpoint_path:
+            raise ValueError("SSL downstream runs require ssl_checkpoint")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        requested_method = config.get("ssl_method")
+        actual_method = checkpoint.get("method", "simclr")
+        if requested_method and requested_method != actual_method:
+            raise ValueError(f"Configured SSL method {requested_method} does not match checkpoint {actual_method}")
+        model.load_pretrained_encoder(checkpoint)
     elif mode != "supervised":
-        raise ValueError("mode must be supervised, simclr_linear, or simclr_finetune")
+        raise ValueError("mode must be supervised, ssl_linear, or ssl_finetune")
     model.to(device)
 
     optimizer = AdamW(
@@ -100,6 +128,13 @@ def main() -> None:
     best_epoch = 0
     patience = int(config.get("early_stopping_patience", 10))
     history: list[dict[str, float]] = []
+    cached_train = cached_dev = None
+    if linear_probe:
+        print("Extracting frozen train/development features once for the linear probe...")
+        cached_train = extract_features(model, train_frame, image_size, int(config["batch_size"]),
+                                        int(config.get("num_workers", 4)), device)
+        cached_dev = extract_features(model, dev_frame, image_size, int(config["batch_size"]),
+                                      int(config.get("num_workers", 4)), device)
     start_epoch = 1
     resume_path = output_dir / "last.pt"
     if bool(config.get("resume", True)) and resume_path.is_file():
@@ -113,18 +148,38 @@ def main() -> None:
         history = checkpoint["history"]
 
     for epoch in range(start_epoch, int(config["epochs"]) + 1):
-        model.train()
+        model.train(not linear_probe)
+        if linear_probe:
+            model.encoder.eval()
         loss_sum = 0.0
-        for images, targets in train_loader:
-            images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
-                loss = criterion(model(images), targets)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            loss_sum += loss.item()
-        dev_targets, dev_probabilities = predict(model, dev_loader, device)
+        if linear_probe:
+            features, targets = cached_train
+            permutation = torch.randperm(len(features))
+            for indices in permutation.split(int(config["batch_size"])):
+                batch_features = features[indices].to(device, non_blocking=True)
+                batch_targets = targets[indices].to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                loss = criterion(model.classifier(batch_features), batch_targets)
+                loss.backward()
+                optimizer.step()
+                loss_sum += loss.item()
+            dev_targets = cached_dev[1].numpy()
+            model.classifier.eval()
+            with torch.inference_mode():
+                dev_probabilities = torch.sigmoid(
+                    model.classifier(cached_dev[0].to(device)).float()
+                ).cpu().numpy()
+        else:
+            for images, targets in train_loader:
+                images, targets = images.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                    loss = criterion(model(images), targets)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                loss_sum += loss.item()
+            dev_targets, dev_probabilities = predict(model, dev_loader, device)
         metrics = multilabel_metrics(dev_targets, dev_probabilities)
         metrics.update({"epoch": epoch, "train_loss": loss_sum / max(1, len(train_loader))})
         history.append(metrics)
@@ -153,7 +208,10 @@ def main() -> None:
 
     save_json(
         output_dir / "metrics.json",
-        {"mode": mode, "label_fraction": config["label_fraction"], "history": history, "best_dev_auroc": best_score, "best_epoch": best_epoch, "positive_weights": positive_weights(train_frame).tolist()},
+        {"mode": mode, "ssl_method": actual_method if is_ssl else None,
+         "label_fraction": config["label_fraction"], "history": history,
+         "best_dev_auroc": best_score, "best_epoch": best_epoch,
+         "positive_weights": positive_weights(train_frame).tolist()},
     )
     train_frame[["patient_id"]].drop_duplicates().to_csv(output_dir / "sampled_patients.csv", index=False)
 

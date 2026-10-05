@@ -41,11 +41,14 @@ def main() -> None:
         downstream_source = train.loc[train["Frontal/Lateral"].eq("Frontal")].copy()
     downstream_train, dev = split_by_patient(downstream_source, args.dev_fraction, args.seed)
     assert_patient_disjoint(downstream_train, dev, valid)
+    train_patient_ids = set(downstream_train["patient_id"].astype(str))
+    pretrain_train = train.loc[train["patient_id"].astype(str).isin(train_patient_ids)].copy()
+    assert_patient_disjoint(pretrain_train, dev, valid)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     splits_dir = args.output_dir.parent / "splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
-    train.to_csv(args.output_dir / "pretrain_train.csv", index=False)
+    pretrain_train.to_csv(args.output_dir / "pretrain_train.csv", index=False)
     downstream_train.to_csv(args.output_dir / "downstream_train.csv", index=False)
     dev.to_csv(args.output_dir / "development.csv", index=False)
     valid.to_csv(args.output_dir / "final_validation.csv", index=False)
@@ -65,7 +68,7 @@ def main() -> None:
         args.output_dir / "data_report.json",
         {
             "dataset_root": str(root),
-            "pretrain_records": len(train),
+            "pretrain_records": len(pretrain_train),
             "downstream_train_records": len(downstream_train),
             "development_records": len(dev),
             "final_validation_records": len(valid),
@@ -75,7 +78,7 @@ def main() -> None:
             "seed": args.seed,
             "frontal_only_downstream": args.frontal_only_downstream,
             "manifest_hashes": {
-                "pretrain_train": manifest_hash(train),
+                "pretrain_train": manifest_hash(pretrain_train),
                 "downstream_train": manifest_hash(downstream_train),
                 "development": manifest_hash(dev),
                 "final_validation": manifest_hash(valid),

@@ -1,8 +1,6 @@
 architectures:
   - resnet18
   - resnet50
-  - densenet121
-  - efficientnet_b0
-  - vit_b_16
-default_image_size: 224
+default_encoder: resnet18
+default_image_size: 128
 default_pretrained: false

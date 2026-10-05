@@ -1,27 +1,17 @@
 seed: 42
 device: auto
+method: byol
 manifest: data/processed/manifests/pretrain_train.csv
-output_dir: outputs/pretrain/simclr-resnet18-seed42
+output_dir: outputs/pretrain/byol-resnet18-seed42
 encoder: resnet18
-method: simclr
 image_size: 128
 batch_size: 16
 num_workers: 4
 epochs: 30
-horizontal_flip: false
 learning_rate: 0.0003
 weight_decay: 0.0001
 resume: true
 ssl:
   hidden_dim: 512
   projection_dim: 128
-  temperatures:
-    simclr: 0.2
-    moco: 0.2
-    nnclr: 0.1
-    swav: 0.1
-  queue_size: 4096
   momentum: 0.99
-  prototype_count: 300
-  sinkhorn_epsilon: 0.05
-  prototype_freeze_steps: 100

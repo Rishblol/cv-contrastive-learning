@@ -4,7 +4,7 @@
 
 This project investigates whether self-supervised contrastive learning (SSL) can reduce the amount of labeled data required for clinically useful chest X-ray classification. The dataset is the bundled CheXpert-v1.0-small release. It contains frontal and lateral chest radiographs with multi-label clinical observations, an official training manifest, and an official validation manifest.
 
-The main method is SimCLR: an encoder learns image representations from different augmented views of the same X-ray without using disease labels. The pretrained encoder is then evaluated on downstream disease prediction using progressively smaller labeled subsets. Its results are compared to models trained with labels alone.
+The primary comparison is among five image-only self-supervised learning methods: SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. They share the same ResNet encoder, image pool, and augmentation policy. Each encoder is evaluated with a frozen linear probe and full fine-tuning on fixed labeled-patient budgets, alongside a supervised-from-scratch baseline.
 
 The project should prioritize a reliable, reproducible comparison over maximizing a single validation score.
 
@@ -12,13 +12,13 @@ The project should prioritize a reliable, reproducible comparison over maximizin
 
 ### Primary research question
 
-Does SimCLR pretraining on unlabeled CheXpert radiographs improve downstream multi-label classification performance when only a small fraction of labels is available?
+How do SimCLR, MoCo v2, BYOL, NNCLR, and SwAV pretraining on unlabeled CheXpert radiographs compare in downstream multi-label classification at limited label budgets?
 
 ### Hypotheses
 
-1. A SimCLR-pretrained encoder will outperform a supervised model trained from scratch at 1%, 5%, 10%, and 25% labeled-data budgets.
-2. The performance advantage will be largest at the lowest label budgets and narrow as the budget approaches 100%.
-3. Fine-tuning the full pretrained encoder will generally outperform a frozen linear probe, while the linear probe will show whether the learned representations are directly useful.
+1. SSL-pretrained encoders will improve over supervised training from scratch at low labeled-data budgets.
+2. Relative performance will differ among the five SSL objectives and may vary with label budget.
+3. Fine-tuning and frozen linear probing provide complementary measures of transfer quality.
 4. Gains will differ by pathology because label prevalence, uncertainty, and image appearance differ across observations.
 
 ## 3. Scope
@@ -31,7 +31,7 @@ Does SimCLR pretraining on unlabeled CheXpert radiographs improve downstream mul
   - Consolidation
   - Edema
   - Pleural Effusion
-- SimCLR pretraining on all available training radiographs without labels.
+- Five SSL methods (SimCLR, MoCo v2, BYOL, NNCLR, and SwAV) trained on the same training-patient radiographs without labels.
 - Label-efficient downstream experiments at fixed label budgets.
 - Supervised baselines, linear-probe evaluation, and full fine-tuning.
 - Patient-level split controls, reproducible experiment tracking, and clinically cautious error analysis.
@@ -39,7 +39,7 @@ Does SimCLR pretraining on unlabeled CheXpert radiographs improve downstream mul
 ### Out of scope for the first version
 
 - Diagnosis or clinical deployment.
-- Comparison with multiple SSL families such as MoCo, BYOL, DINO, or masked autoencoders.
+- DINO, masked autoencoders, and additional SSL objectives beyond the five defined above.
 - Training on external datasets or reporting claims of generalization beyond CheXpert.
 - Use of images or labels from the official validation set during model selection.
 
@@ -88,26 +88,17 @@ This mapping must be implemented in one reusable preprocessing function and reco
 
 ### Shared encoder
 
-Compare five interchangeable backbones: ResNet-18, ResNet-50, DenseNet-121,
-EfficientNet-B0, and ViT-B/16. All receive normalized three-channel X-rays and
-return one feature vector per image; a shared linear head produces five logits.
-Convolutional backbones use their pooled feature representation. ViT-B/16 uses
-its class-token representation. All are randomly initialized for the primary
-image-only comparison; ImageNet initialization is a separate configurable
-experiment and must be reported distinctly.
+Use ResNet-18 as the default shared encoder for all five SSL methods. ResNet-50
+is an optional higher-compute setting. The architecture and input resolution
+must be identical across methods in a comparison.
 
-Use the same architecture set across the supervised-from-scratch, SimCLR linear
-probe, and SimCLR fine-tuning methods. Image resolution and architecture are
-configuration values, and each run records its backbone so metrics can be
-compared by architecture and method.
-
-### SimCLR pretraining
+### SSL pretraining
 
 - Pretrain only on images from the training partition; do not use downstream labels.
-- Add a two-layer MLP projection head after the encoder. The contrastive loss operates on projected features, while downstream models use encoder features.
-- Use normalized embeddings and NT-Xent loss with a configurable temperature.
-- Start with a high-memory-GPU reference configuration: global batch size 256 or larger when memory permits, mixed precision, LARS or AdamW optimizer, cosine learning-rate schedule, and a warmup phase.
-- Train for a sufficiently long fixed schedule (reference: 200 epochs) after validating the pipeline with a short smoke run. Save best/last checkpoints and the exact configuration.
+- Use the method-specific projection/prediction heads and objective for SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. Downstream transfer uses the online encoder only.
+- Share the data partition, two-view augmentation policy, optimizer family, and encoder architecture across methods. Method-specific temperatures, queues, momentum, and prototypes are configuration values.
+- Use mixed precision when CUDA is available, AdamW, and a cosine learning-rate schedule. The default starting point is batch size 16, 128-pixel input, and 30 epochs; adjust only after recording a short smoke-run throughput and memory profile.
+- Save resumable per-epoch checkpoints and the exact configuration.
 
 ### X-ray-safe augmentation policy
 
@@ -125,11 +116,11 @@ The project should save example pairs of augmented views before launching full t
 
 ### Downstream models
 
-Train three methods with identical data splits, input resolution, label mappings, and evaluation code:
+Train matched downstream protocols with identical data splits, input resolution, label mappings, and evaluation code:
 
 1. **Supervised from scratch**: randomly initialized selected backbone plus classification head, trained only on the chosen labeled subset.
-2. **SimCLR linear probe**: freeze the selected SimCLR-pretrained backbone and train only the five-logit classification head.
-3. **SimCLR fine-tuning**: initialize the selected backbone from its SimCLR checkpoint, then optimize the encoder and classification head together on the labeled subset.
+2. **SSL linear probe**: freeze the selected method's pretrained backbone, cache train/development features once, and train only the five-logit classification head.
+3. **SSL fine-tuning**: initialize the selected backbone from its method checkpoint, then optimize the encoder and classification head together on the labeled subset.
 
 Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labeled training subset. Store the weights in the run metadata. Optimize AUROC-oriented model selection with the development set; do not select checkpoints from the official validation set.
 
@@ -147,7 +138,7 @@ The VLM track has three roles:
 2. **Frozen VLM feature probe**: freeze the VLM image encoder and train the same five-logit linear head used for SimCLR. This isolates the quality of its visual representations under the project label budgets.
 3. **VLM fine-tuning**: fine-tune the image encoder and classification head at the same label budgets when the checkpoint license and hardware permit. Use a lower encoder learning rate than the newly initialized head.
 
-The primary image-only question remains SimCLR versus supervised learning from scratch. The VLM extension answers a secondary question: whether prior image-text alignment changes zero-shot performance, representation quality, or label efficiency relative to image-only SSL.
+The primary image-only question compares the five SSL methods with supervised learning from scratch. The VLM extension answers a secondary question about image-text transfer and must be reported separately.
 
 ### Prompt protocol for zero-shot VLM evaluation
 
@@ -174,7 +165,7 @@ Use VLMs as an analysis tool, not as a source of generated clinical labels or me
 
 Run each downstream method at 1%, 5%, 10%, 25%, and 100% of labeled training patients. Use three fixed, published random seeds for each budget. All methods under a seed/budget pair must receive the exact same sampled patients.
 
-The image-only core produces 45 downstream runs: 3 methods x 5 budgets x 3 seeds. The VLM extension adds 15 frozen-probe runs (5 budgets x 3 seeds) and, if compute permits, 9 fine-tuning runs (1%, 10%, and 100% x 3 seeds). Run the VLM zero-shot evaluation once per fixed prompt set because it has no sampled-label training phase. SimCLR pretraining may be run once per training partition and reused across downstream budgets; run an additional pretraining seed only after the primary matrix is complete.
+The image-only core produces 165 downstream runs: 11 initialization/protocol arms (five SSL methods each with linear probe and fine-tuning, plus supervised-from-scratch) x 5 budgets x 3 seeds. This full matrix is compute-intensive; smoke-test one run per method first, and use fewer seeds/budgets for iteration without changing the final declared matrix. Each SSL pretraining run is reused across downstream budgets.
 
 ### Recommended execution order
 
@@ -182,8 +173,8 @@ The image-only core produces 45 downstream runs: 3 methods x 5 budgets x 3 seeds
 2. Produce patient-disjoint partitions and persist their IDs.
 3. Run unit tests and a 100- to 1,000-image smoke test for each data loader and training loop.
 4. Train a supervised 100% baseline to establish a functioning end-to-end reference.
-5. Inspect SimCLR augmentation pairs, then run a short pretraining validation run.
-6. Complete full SimCLR pretraining and archive its checkpoint.
+5. Inspect the shared augmentation pairs, then run a short pretraining validation for each SSL objective.
+6. Complete full pretraining for all five methods and archive their checkpoints.
 7. Run linear-probe and fine-tuning experiments from smallest to largest label budget.
 8. Validate VLM preprocessing and prompt scoring on the development split; then run the zero-shot and frozen-feature experiments.
 9. Run VLM fine-tuning only after the frozen-feature and zero-shot results are complete and only at the designated budget tiers.
@@ -197,10 +188,10 @@ These are starting points, not results to tune against the official validation s
 | Component | Initial configuration |
 | --- | --- |
 | Image size | 224 x 224 |
-| SSL backbones | ResNet-18, ResNet-50, DenseNet-121, EfficientNet-B0, ViT-B/16 |
-| SSL epochs | 200 |
+| SSL encoder | ResNet-18 default; ResNet-50 optional |
+| SSL epochs | 30 initial compute-conscious default |
 | SSL temperature | 0.1 to 0.2, selected on development protocol |
-| SSL effective batch size | 256+ with gradient accumulation if required |
+| SSL batch size | 16 default; increase if GPU memory and throughput allow |
 | Downstream epochs | Up to 50 with development-set early stopping |
 | Fine-tuning optimizer | AdamW with discriminative or lower encoder learning rate |
 | Linear-probe optimizer | AdamW |
@@ -222,7 +213,7 @@ Macro AUROC across the five observations on the official validation set. This gi
 - Patient-level bootstrap 95% confidence intervals for final AUROC and for the fine-tuned-SimCLR minus supervised-baseline difference.
 - Training time, peak GPU memory where available, epochs completed, and checkpoint size.
 - Zero-shot VLM metrics with the frozen prompt-set version and calibration status clearly identified.
-- Pairwise label-efficiency deltas at each budget: SimCLR fine-tuning minus supervised training, and VLM frozen probe minus SimCLR linear probe.
+- Pairwise label-efficiency deltas at each budget: each SSL fine-tuning method minus supervised training, plus VLM frozen probe versus the strongest predeclared image-only probe.
 - Slice-level performance with sample counts and confidence intervals where sufficiently powered; do not make subgroup claims from sparse slices.
 
 ### Result presentation
@@ -294,7 +285,7 @@ The supervised 100% run completes, produces development metrics, and can be eval
 
 ### Milestone 3: SSL representation
 
-SimCLR pretraining completes with inspected augmentations, finite contrastive loss, saved checkpoints, and logged configuration.
+All five SSL pretraining methods complete smoke checks with inspected augmentations, finite losses, saved checkpoints, and logged configurations.
 
 ### Milestone 4: Label-efficiency study
 
@@ -328,7 +319,7 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 
 1. A documented, configuration-driven training pipeline.
 2. Patient-level manifests and reproducible split files.
-3. Supervised, linear-probe, and fine-tuned SimCLR checkpoints and metric logs.
+3. Supervised, SSL linear-probe, and SSL fine-tuned checkpoints and metric logs for all five objectives.
 4. Versioned VLM prompt sets, zero-shot scores, frozen-feature probes, and optional VLM fine-tuning artifacts.
 5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
 6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
@@ -359,16 +350,18 @@ presence alone.
 
 ### Implemented image-only experiments
 
-- `scripts/train_pretrain.py` trains the selected backbone with SimCLR, writes conservative
-  two-view augmentation samples, and saves `best.pt`, `last.pt`, and loss
-  history. Horizontal flip is explicitly configurable and disabled by default.
+- `scripts/train_pretrain.py` supports SimCLR, MoCo v2, BYOL, NNCLR, and SwAV
+  using the shared ResNet-18/ResNet-50 encoder interface. Each method writes
+  augmentation examples and resumable `best.pt`/`last.pt` checkpoints that
+  include transferable online-encoder weights.
 - `scripts/prepare_smoke_manifest.py` creates a bounded unlabeled manifest for
   a short SimCLR pipeline check. `configs/pretrain/simclr_smoke.yaml` uses it
   with ResNet-18 and one epoch before full pretraining is started.
-- `scripts/train_downstream.py` supports `supervised`, `simclr_linear`, and
-  `simclr_finetune` modes, accepts persisted sampled-patient JSON files, uses
-  subset-specific positive weights, selects checkpoints by development macro
-  AUROC, applies early stopping, and persists development-selected thresholds.
+- `scripts/train_downstream.py` supports supervised training, SSL frozen linear
+  probes, and SSL fine-tuning. Linear probes extract frozen train/development
+  features once before fitting the five-label head. Runs accept persisted
+  sampled-patient JSON files, use subset-specific positive weights, select
+  checkpoints by development macro AUROC, and save development-selected thresholds.
 - `scripts/evaluate_checkpoint.py` is the explicit locked-configuration path
   for the official validation manifest. It writes metrics, per-image
   probabilities, threshold metrics, and a patient-resampled macro-AUROC CI.
@@ -396,18 +389,17 @@ presence alone.
   worksheet containing the run, image/patient/study IDs, label, prediction,
   threshold, view, attribution placeholder, and reviewer-observation field.
 
-### Architecture comparison
+### Five-method comparison
 
-- `configs/models/backbones.yaml` declares the shared comparison set:
-  ResNet-18, ResNet-50, DenseNet-121, EfficientNet-B0, and ViT-B/16.
-- The encoder factory removes each classifier head and returns a fixed feature
-  vector interface used by SimCLR and the five-logit downstream classifier.
-  ViT-B/16 contributes its class-token feature vector.
-- The three image-only downstream methods run with the same architecture set,
-  persisted patient cohorts, label budgets, and seeds. Aggregated metrics retain
-  the architecture as a separate comparison field.
-- Image-only training resumes from the latest epoch checkpoint when available,
-  allowing long runs to continue after an interruption.
+- Separate YAML configs define the shared default ResNet-18 pretraining setup
+  for each SSL method. ResNet-50 remains an optional higher-compute comparison.
+- The online encoder checkpoint from each method can be reused for every
+  downstream label budget and seed.
+- Pretraining manifests now contain every available view for training patients
+  only, keeping development patients out of SSL representation learning.
+- Downstream comparisons must point each method to the same persisted patient
+  cohort for each budget/seed pair. Do not use the official validation partition
+  for selection.
 
 ### Deferred implementation and operational requirements
 
@@ -418,6 +410,6 @@ presence alone.
 - The existing unit tests cover uncertainty conversion, patient-overlap checks,
   patient budgets, NT-Xent finiteness, and basic multi-label metrics. The
   remaining checks in Section 9 still need implementation.
-- Before any expensive run, inspect `augmentation_pairs.png`, execute the test
-  suite and smoke runs, review VLM provenance/license/overlap risk, and lock a
-  configuration on the development split before calling final evaluation.
+- Before any expensive run, execute the test suite and smoke each SSL objective,
+  inspect `augmentation_pairs.png`, review VLM provenance/license/overlap risk,
+  and lock a configuration on development data before final evaluation.

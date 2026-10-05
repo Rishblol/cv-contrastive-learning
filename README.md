@@ -1,47 +1,41 @@
 # Self-Supervised CheXpert Classification
 
-This repository implements the full, configuration-driven study protocol in
-[docs/context.md](docs/context.md): patient-safe CheXpert preparation, SimCLR
-pretraining, supervised/linear-probe/fine-tuning comparisons, locked final
-evaluation, and an optional CheXzero-compatible VLM track.
+This repository compares five image-only self-supervised learning (SSL)
+methods using a shared ResNet-18 encoder: SimCLR, MoCo v2, BYOL, NNCLR, and
+SwAV. Each learned encoder is evaluated with a frozen linear probe and full
+fine-tuning across the same patient-level label budgets. A supervised-from-
+scratch model is the reference baseline. ResNet-50 can be selected in the
+pretraining and downstream YAML files when additional compute is available.
+
+The workflow is implemented as Python scripts and YAML configurations. The
+notebook in `notebooks/` is a reference implementation, not a required runtime.
 
 ## Setup
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Use Python 3.10-3.13. The active local Python 3.14 environment does not currently
-have the required PyTorch package installed.
+On Windows, activate with `.venv\\Scripts\\Activate.ps1`.
 
-## Model comparison
+## Prepare data
 
-The shared image-only backbone set is ResNet-18, ResNet-50, DenseNet-121,
-EfficientNet-B0, and ViT-B/16. Every backbone uses the same input interface and
-five-label head. Experiment choices are listed in
-`configs/models/backbones.yaml`; run-specific resolved configurations are saved
-with each output. ViT-B/16 expects the shared 224 x 224 input size.
-
-## Prepare manifests
-
-This reads the bundled dataset, applies the declared CheXpert uncertainty policy,
-filters invalid paths, and creates patient-disjoint train/development partitions.
-
-```powershell
+```bash
 python scripts/prepare_data.py --dataset-root CheXpert-v1.0-small --frontal-only-downstream
 ```
 
-The official validation manifest is written to `data/processed/manifests/final_validation.csv`.
-Do not use it for model or prompt selection.
+The script writes manifests, patient cohorts, and provenance to `data/processed/`.
+Pretraining uses every view from training patients only; development patients
+are excluded from both SSL and downstream training. The official validation
+partition must not be used for model selection.
 
-## Train the image-only study
+If these manifests were generated before this pipeline update, rerun
+`prepare_data.py` once so `pretrain_train.csv` excludes development patients.
 
-Before full pretraining, run the tests and a short SimCLR check. The smoke
-manifest contains at most 256 records and is written under ignored generated
-data. Inspect `outputs/smoke/simclr-resnet18/augmentation_pairs.png` before
-starting the full schedule.
+If the manifests and cohorts are already prepared, continue with tests and the
+short smoke run. The smoke config uses a small ResNet-18 and one epoch:
 
 ```bash
 pytest
@@ -49,58 +43,42 @@ python scripts/prepare_smoke_manifest.py
 python scripts/train_pretrain.py --config configs/pretrain/simclr_smoke.yaml
 ```
 
-After reviewing the augmentation pairs, launch the configured training runs:
+Inspect `outputs/smoke/simclr-resnet18/augmentation_pairs.png` before full
+training.
 
-```powershell
+## Pretrain the five methods
+
+Each method has its own resumable config and checkpoint directory. Defaults use
+ResNet-18, 128-pixel images, batch size 16, and 30 epochs to fit a modest GPU.
+Run them individually; completed epochs are saved in `last.pt`.
+
+```bash
 python scripts/train_pretrain.py --config configs/pretrain/simclr.yaml
-python scripts/train_downstream.py --config configs/downstream/supervised.yaml
-python scripts/train_downstream.py --config configs/downstream/simclr_linear.yaml
-python scripts/train_downstream.py --config configs/downstream/simclr_finetune.yaml
+python scripts/train_pretrain.py --config configs/pretrain/moco.yaml
+python scripts/train_pretrain.py --config configs/pretrain/byol.yaml
+python scripts/train_pretrain.py --config configs/pretrain/nnclr.yaml
+python scripts/train_pretrain.py --config configs/pretrain/swav.yaml
 ```
 
-`prepare_data.py` persists nested patient cohorts for every budget and seed in
-`data/processed/splits/`. Reference the appropriate JSON through
-`sampled_patients` in each downstream/VLM config so every method uses identical
-patients. The initial fixed seeds are 42, 43, and 44; budgets are 1%, 5%, 10%,
-25%, and 100%.
+## Downstream comparisons
 
-## Locked final evaluation and reporting
+Set `ssl_checkpoint` in `configs/downstream/simclr_linear.yaml` or
+`simclr_finetune.yaml` to the selected method's `best.pt` or `last.pt`, and set
+`ssl_method` to its name (`simclr`, `moco`, `byol`, `nnclr`, or `swav`). Set
+`output_dir` to a unique method/budget/seed path. Use the same persisted
+`sampled_patients` JSON for every method at a given budget and seed. For
+supervised-from-scratch, use `configs/downstream/supervised.yaml`. Linear probes
+cache frozen features once, then train only the small classification head.
+Fine-tuning and supervised training select checkpoints on the internal
+development partition.
 
-After selecting a configuration exclusively on the development split, point
-`configs/evaluation/final_validation.yaml` at its checkpoint and thresholds:
-
-```powershell
-python scripts/evaluate_checkpoint.py --config configs/evaluation/final_validation.yaml
-python scripts/aggregate_results.py
-python scripts/analyze_errors.py --predictions outputs/reports/.../predictions.csv --thresholds outputs/downstream/.../thresholds.json --run-id RUN_ID --output outputs/analysis/RUN_ID/errors.csv
-```
-
-This is the only command path intended to read the official validation manifest.
+After locking the configuration on development data, run
+`scripts/evaluate_checkpoint.py` against the official validation manifest and
+aggregate machine-readable metrics with `scripts/aggregate_results.py`.
 
 ## Optional VLM extension
 
-Install the optional dependencies, review and pin a CheXzero-compatible model
-checkpoint/revision/license, then replace the explicit placeholders in
-`configs/vlm/`. Prompts are versioned in `configs/prompts/chexpert_v1.yaml`.
-
-```powershell
-pip install -e ".[vlm]"
-python scripts/evaluate_vlm_zeroshot.py --config configs/vlm/zeroshot.yaml
-python scripts/train_vlm.py --config configs/vlm/linear_probe.yaml
-python scripts/train_vlm.py --config configs/vlm/finetune.yaml
-```
-
-VLM results are always marked `image-text VLM` and must be reported separately
-from the image-only SimCLR comparison.
-
-## Verification
-
-```powershell
-pytest
-```
-
-The implementation includes the image-only core and optional VLM tooling. VLM
-configs contain placeholders and require checkpoint, revision, source, and
-license review before use. Run focused tests before a full training run, inspect
-the saved SimCLR augmentation pairs, and select settings on the development
-partition before locked final evaluation.
+VLM experiments are a separate optional track. Install `pip install -e ".[vlm]"`
+and review the pinned checkpoint, revision, source, and license requirements in
+`AGENTS.md` and `configs/vlm/` before use. Do not silently substitute a general
+CLIP model.

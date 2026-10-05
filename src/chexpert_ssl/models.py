@@ -69,16 +69,19 @@ class MultiLabelClassifier(nn.Module):
         for parameter in self.encoder.parameters():
             parameter.requires_grad = False
 
-    def load_simclr_encoder(self, checkpoint: dict[str, object]) -> None:
-        """Load encoder weights from a checkpoint written by train_pretrain.py."""
-        state = checkpoint["model"] if "model" in checkpoint else checkpoint
-        encoder_state = {
-            key.removeprefix("encoder."): value
-            for key, value in state.items()
-            if key.startswith("encoder.")
-        }
-        if not encoder_state:
-            raise ValueError("Checkpoint does not contain SimCLR encoder weights")
+    def load_pretrained_encoder(self, checkpoint: dict[str, object]) -> None:
+        """Load the online encoder from any SSL method checkpoint."""
+        state = checkpoint.get("encoder")
+        if state is None:
+            model_state = checkpoint.get("model", checkpoint)
+            state = {
+                key.removeprefix("encoder."): value
+                for key, value in model_state.items()
+                if key.startswith("encoder.")
+            }
+        if not state:
+            raise ValueError("Checkpoint does not contain transferable online encoder weights")
+        encoder_state = state
         self.encoder.load_state_dict(encoder_state, strict=True)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:

@@ -4,11 +4,11 @@ mode: supervised
 train_manifest: data/processed/manifests/downstream_train.csv
 development_manifest: data/processed/manifests/development.csv
 output_dir: outputs/downstream/supervised-1pct-seed42
-encoder: resnet50
+encoder: resnet18
 imagenet_pretrained: false
-image_size: 224
+image_size: 128
 label_fraction: 0.01
-batch_size: 32
+batch_size: 16
 num_workers: 4
 epochs: 50
 early_stopping_patience: 10
