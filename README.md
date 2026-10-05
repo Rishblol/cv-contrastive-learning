@@ -18,7 +18,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-On Windows, activate with `.venv\\Scripts\\Activate.ps1`.
+On Windows, activate with `.venv\Scripts\Activate.ps1`.
 
 ## Prepare data
 
@@ -60,6 +60,13 @@ python scripts/train_pretrain.py --config configs/pretrain/nnclr.yaml
 python scripts/train_pretrain.py --config configs/pretrain/swav.yaml
 ```
 
+All five methods use the same PIL/torchvision two-view data pipeline and
+ResNet-18 input settings. Images are decoded from disk during training rather
+than stored as a full-dataset cache, which avoids a large extra cache but makes
+storage throughput and `num_workers` affect epoch time. `train_pretrain.py`
+prints periodic step loss and per-epoch duration; use those measurements to
+adjust the YAML batch size/epoch count before committing to the full schedule.
+
 ## Downstream comparisons
 
 Set `ssl_checkpoint` in `configs/downstream/simclr_linear.yaml` or
@@ -67,8 +74,11 @@ Set `ssl_checkpoint` in `configs/downstream/simclr_linear.yaml` or
 `ssl_method` to its name (`simclr`, `moco`, `byol`, `nnclr`, or `swav`). Set
 `output_dir` to a unique method/budget/seed path. Use the same persisted
 `sampled_patients` JSON for every method at a given budget and seed. For
-supervised-from-scratch, use `configs/downstream/supervised.yaml`. Linear probes
-cache frozen features once, then train only the small classification head.
+supervised-from-scratch, use `configs/downstream/supervised.yaml`. To run the
+ImageNet reference supported by the same script, set
+`imagenet_pretrained: true` in a separate downstream config/output directory;
+keep it distinct from the supervised-from-scratch run. Linear probes cache
+frozen features once, then train only the small classification head.
 Fine-tuning and supervised training select checkpoints on the internal
 development partition.
 

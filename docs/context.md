@@ -4,7 +4,7 @@
 
 This project investigates whether self-supervised contrastive learning (SSL) can reduce the amount of labeled data required for clinically useful chest X-ray classification. The dataset is the bundled CheXpert-v1.0-small release. It contains frontal and lateral chest radiographs with multi-label clinical observations, an official training manifest, and an official validation manifest.
 
-The primary comparison is among five image-only self-supervised learning methods: SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. They share the same ResNet encoder, image pool, and augmentation policy. Each encoder is evaluated with a frozen linear probe and full fine-tuning on fixed labeled-patient budgets, alongside a supervised-from-scratch baseline.
+The primary comparison is among five image-only self-supervised learning methods: SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. They share the same ResNet encoder, image pool, and augmentation policy. Each encoder is evaluated with a frozen linear probe and full fine-tuning on fixed labeled-patient budgets, alongside supervised-from-scratch and ImageNet-initialized reference baselines.
 
 The project should prioritize a reliable, reproducible comparison over maximizing a single validation score.
 
@@ -33,7 +33,7 @@ How do SimCLR, MoCo v2, BYOL, NNCLR, and SwAV pretraining on unlabeled CheXpert 
   - Pleural Effusion
 - Five SSL methods (SimCLR, MoCo v2, BYOL, NNCLR, and SwAV) trained on the same training-patient radiographs without labels.
 - Label-efficient downstream experiments at fixed label budgets.
-- Supervised baselines, linear-probe evaluation, and full fine-tuning.
+- Supervised-from-scratch and ImageNet-initialized reference baselines, linear-probe evaluation, and full fine-tuning.
 - Patient-level split controls, reproducible experiment tracking, and clinically cautious error analysis.
 
 ### Out of scope for the first version
@@ -102,17 +102,16 @@ must be identical across methods in a comparison.
 
 ### X-ray-safe augmentation policy
 
-SimCLR needs two independently augmented views of the same image, but X-ray transformations must preserve clinically meaningful anatomy.
+All five SSL methods use two independently augmented views of each image. X-ray transformations must preserve clinically meaningful anatomy.
 
-- Resize to a larger intermediate size, then use random resized crops with a conservative crop scale.
-- Use modest rotation and translation only.
-- Use mild brightness and contrast variation to model acquisition differences.
-- Use modest Gaussian blur or noise.
+- Use random resized crops (scale 0.75–1.0), modest rotation/translation, mild brightness/contrast changes, and occasional 3-pixel Gaussian blur.
 - Do not apply hue or saturation changes to grayscale radiographs.
 - Avoid aggressive crops, large rotations, posterization, or cutout transforms that can remove pathology-bearing regions.
 - Treat horizontal flipping as a configurable ablation. The default primary protocol should disable it because laterality can be clinically informative.
 
-The project should save example pairs of augmented views before launching full training and manually inspect them for anatomical plausibility.
+The current torchvision pipeline decodes images from disk on each pass rather than maintaining a full-dataset array cache. This reduces extra disk requirements but makes throughput dependent on storage and DataLoader workers. Training saves example pairs of augmented views before full runs; inspect them for anatomical plausibility.
+
+The implementations use two global views for all five methods. SwAV does not use multi-crop in this study. The MoCo implementation uses a momentum encoder and queue in the single-device workflow; results should be reported with this implementation detail rather than described as a distributed multi-GPU run.
 
 ### Downstream models
 
@@ -121,6 +120,7 @@ Train matched downstream protocols with identical data splits, input resolution,
 1. **Supervised from scratch**: randomly initialized selected backbone plus classification head, trained only on the chosen labeled subset.
 2. **SSL linear probe**: freeze the selected method's pretrained backbone, cache train/development features once, and train only the five-logit classification head.
 3. **SSL fine-tuning**: initialize the selected backbone from its method checkpoint, then optimize the encoder and classification head together on the labeled subset.
+4. **ImageNet reference**: initialize from the configured torchvision ImageNet weights and fine-tune on the same patient cohort. Record it separately from both scratch and CheXpert SSL initialization.
 
 Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labeled training subset. Store the weights in the run metadata. Optimize AUROC-oriented model selection with the development set; do not select checkpoints from the official validation set.
 
@@ -128,14 +128,14 @@ Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labe
 
 ### Vision-language model extension
 
-Add a VLM track to determine whether image-text pretraining provides useful medical representations beyond image-only SimCLR. VLM results must be reported separately from SimCLR results because the VLM may have learned from external paired image-report data and therefore answers a different transfer-learning question.
+Add a VLM track to determine whether image-text pretraining provides useful medical representations beyond the image-only SSL methods. VLM results must be reported separately because the VLM may have learned from external paired image-report data and therefore answers a different transfer-learning question.
 
 Use CheXzero as the primary VLM baseline because it is a CLIP-style model designed for chest X-ray image-text alignment and naturally supports pathology prompts. Pin the exact checkpoint and implementation revision. If CheXzero cannot be used because of an unavailable checkpoint or incompatible license, use one radiology-domain image-text model with equivalent image-embedding and text-embedding interfaces, and identify it as a protocol deviation in the report. Record its name, revision, source, pretraining data description, license, image preprocessing, and any known CheXpert overlap risk before use. Do not silently substitute a general-purpose natural-image CLIP model for the primary VLM result.
 
 The VLM track has three roles:
 
 1. **Zero-shot prompt classification**: score each X-ray against pathology-present and pathology-absent text prompts without fitting a CheXpert classifier. This measures direct language-grounded transfer.
-2. **Frozen VLM feature probe**: freeze the VLM image encoder and train the same five-logit linear head used for SimCLR. This isolates the quality of its visual representations under the project label budgets.
+2. **Frozen VLM feature probe**: freeze the VLM image encoder and train the same five-logit linear head used for image-only SSL. This isolates the quality of its visual representations under the project label budgets.
 3. **VLM fine-tuning**: fine-tune the image encoder and classification head at the same label budgets when the checkpoint license and hardware permit. Use a lower encoder learning rate than the newly initialized head.
 
 The primary image-only question compares the five SSL methods with supervised learning from scratch. The VLM extension answers a secondary question about image-text transfer and must be reported separately.
@@ -154,7 +154,7 @@ The primary image-only question compares the five SSL methods with supervised le
 
 Use VLMs as an analysis tool, not as a source of generated clinical labels or medical conclusions.
 
-- Compare SimCLR, supervised, and VLM feature spaces using UMAP or t-SNE only as qualitative visualizations; do not treat visual separation as a performance metric.
+- Compare SSL, supervised, and VLM feature spaces using UMAP or t-SNE only as qualitative visualizations; do not treat visual separation as a performance metric.
 - Produce class-conditioned retrieval panels: for selected validation queries, retrieve nearest training embeddings and inspect whether anatomy, acquisition artifacts, or pathology cues drive similarity. De-identify and keep examples local to the project.
 - Analyze error slices by view position (`AP` versus `PA`), patient age group if available, sex if available, and label prevalence. Omit a slice when its sample size is too small for stable estimates.
 - Use Grad-CAM or an equivalent image-attribution method for the classifier head. Mark every heatmap as a post-hoc explanation, not proof of clinical reasoning or localization.
@@ -163,17 +163,17 @@ Use VLMs as an analysis tool, not as a source of generated clinical labels or me
 
 ### Label budgets and seeds
 
-Run each downstream method at 1%, 5%, 10%, 25%, and 100% of labeled training patients. Use three fixed, published random seeds for each budget. All methods under a seed/budget pair must receive the exact same sampled patients.
+Run each downstream protocol at 1%, 5%, 10%, 25%, and 100% of labeled training patients. Use three fixed seeds for each budget. All methods under a seed/budget pair must receive the exact same persisted sampled patients.
 
-The image-only core produces 165 downstream runs: 11 initialization/protocol arms (five SSL methods each with linear probe and fine-tuning, plus supervised-from-scratch) x 5 budgets x 3 seeds. This full matrix is compute-intensive; smoke-test one run per method first, and use fewer seeds/budgets for iteration without changing the final declared matrix. Each SSL pretraining run is reused across downstream budgets.
+The full image-only matrix produces 180 downstream runs: 12 initialization/protocol arms (five SSL methods each with linear probe and fine-tuning, plus supervised-from-scratch and ImageNet fine-tuning) x 5 budgets x 3 seeds. This matrix is compute-intensive; first validate the pipeline on one method, one budget, and one seed. Each SSL pretraining run is reused across downstream budgets.
 
 ### Recommended execution order
 
 1. Verify dataset paths and generate prepared manifests.
 2. Produce patient-disjoint partitions and persist their IDs.
-3. Run unit tests and a 100- to 1,000-image smoke test for each data loader and training loop.
-4. Train a supervised 100% baseline to establish a functioning end-to-end reference.
-5. Inspect the shared augmentation pairs, then run a short pretraining validation for each SSL objective.
+3. Run unit tests, check all five SSL losses on a small batch, and complete the bounded end-to-end pretraining smoke.
+4. Run a short downstream smoke with one saved patient cohort before launching supervised-from-scratch and ImageNet reference runs.
+5. Inspect the shared augmentation pairs, then start full pretraining only after smoke losses are finite.
 6. Complete full pretraining for all five methods and archive their checkpoints.
 7. Run linear-probe and fine-tuning experiments from smallest to largest label budget.
 8. Validate VLM preprocessing and prompt scoring on the development split; then run the zero-shot and frozen-feature experiments.
@@ -187,7 +187,7 @@ These are starting points, not results to tune against the official validation s
 
 | Component | Initial configuration |
 | --- | --- |
-| Image size | 224 x 224 |
+| Image size | 128 x 128 default; use the same size across methods |
 | SSL encoder | ResNet-18 default; ResNet-50 optional |
 | SSL epochs | 30 initial compute-conscious default |
 | SSL temperature | 0.1 to 0.2, selected on development protocol |
@@ -210,10 +210,10 @@ Macro AUROC across the five observations on the official validation set. This gi
 - Macro and per-observation AUPRC.
 - Sensitivity, specificity, F1, and balanced accuracy at thresholds selected only on the development set.
 - Mean and standard deviation across seeds.
-- Patient-level bootstrap 95% confidence intervals for final AUROC and for the fine-tuned-SimCLR minus supervised-baseline difference.
+- Patient-level bootstrap 95% confidence intervals for final AUROC and for prespecified SSL-versus-baseline differences.
 - Training time, peak GPU memory where available, epochs completed, and checkpoint size.
 - Zero-shot VLM metrics with the frozen prompt-set version and calibration status clearly identified.
-- Pairwise label-efficiency deltas at each budget: each SSL fine-tuning method minus supervised training, plus VLM frozen probe versus the strongest predeclared image-only probe.
+- Pairwise label-efficiency deltas at each budget: each SSL fine-tuning method versus supervised-from-scratch and ImageNet initialization; compare a VLM frozen probe with the strongest image-only probe selected on development data.
 - Slice-level performance with sample counts and confidence intervals where sufficiently powered; do not make subgroup claims from sparse slices.
 
 ### Result presentation
@@ -263,7 +263,7 @@ Before expensive training, implement and run the following checks:
 1. Manifest parsing correctly resolves every sampled local image path.
 2. Target conversion matches the uncertainty table for synthetic rows containing `1`, `0`, `-1`, and blanks.
 3. No patient appears in more than one partition, label-budget subset, or final-validation overlap.
-4. The two-view SimCLR dataset returns distinct but anatomically plausible tensor views with the expected shape and finite values.
+4. The two-view dataset returns distinct, finite tensors of the expected shape for each SSL method; inspect representative pairs for anatomical plausibility.
 5. The model returns five logits per image and the loss remains finite for an imbalanced mini-batch.
 6. A checkpoint reload produces the same evaluation outputs for fixed inputs.
 7. AUROC and AUPRC functions match known values on small synthetic examples and handle labels with a single class gracefully.
@@ -279,13 +279,13 @@ Before expensive training, implement and run the following checks:
 
 Prepared manifests, data-quality report, uncertainty mapping, and persisted patient-level splits exist. All data tests pass.
 
-### Milestone 2: Baseline
+### Milestone 2: Baselines
 
-The supervised 100% run completes, produces development metrics, and can be evaluated reproducibly from its checkpoint.
+The supervised-from-scratch and ImageNet-initialized 100% runs complete, produce development metrics, and can be evaluated reproducibly from their checkpoints.
 
 ### Milestone 3: SSL representation
 
-All five SSL pretraining methods complete smoke checks with inspected augmentations, finite losses, saved checkpoints, and logged configurations.
+All five SSL objectives pass the small-batch smoke tests. The bounded end-to-end pretraining run completes with inspected augmentations, finite loss, a saved checkpoint, and run metadata.
 
 ### Milestone 4: Label-efficiency study
 
@@ -307,7 +307,7 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 | Uncertain labels alter conclusions | Use one declared primary mapping and report a separate sensitivity analysis only if time permits. |
 | Class imbalance hides poor minority-label performance | Report both AUROC and AUPRC per label; use weighted loss. |
 | SSL augmentations corrupt clinical features | Save and inspect paired views; keep transforms conservative. |
-| Large SimCLR batch does not fit memory | Use gradient accumulation, mixed precision, and a configured lower batch size while preserving the global-batch target where possible. |
+| SSL batch does not fit GPU memory | Use mixed precision and lower the configured batch size; record the setting because it affects method comparison. |
 | Repeated validation-set tuning overfits results | Use the internal development split for all selection and evaluate the official validation manifest only after configurations are locked. |
 | Small low-budget subsets are unstable | Use fixed multi-seed patient samples and report variance, not just the best run. |
 | VLM pretrained on data overlapping CheXpert | Review the model card and pretraining documentation; disclose known or unresolved overlap and label results as transfer benchmarks, not independent generalization. |
@@ -324,12 +324,13 @@ The final report includes the primary AUROC comparison, secondary metrics, confi
 5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
 6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
 
-## 13. Implementation Status (2026-10-02)
+## 13. Implementation Status (2026-10-05)
 
 The repository contains the configured data and training pipeline. The image-only
-training pipeline has not yet been run end to end; no performance claim,
-checkpoint, split artifact, or final-validation result is implied by code
-presence alone.
+training pipeline has not yet been run end to end in this workspace; the local
+pytest attempt could not collect tests because PyTorch, NumPy, and pandas are not
+installed here. No performance claim, checkpoint, split artifact, or
+final-validation result is implied by code presence alone.
 
 ### Implemented data and reproducibility foundation
 
@@ -355,8 +356,8 @@ presence alone.
   augmentation examples and resumable `best.pt`/`last.pt` checkpoints that
   include transferable online-encoder weights.
 - `scripts/prepare_smoke_manifest.py` creates a bounded unlabeled manifest for
-  a short SimCLR pipeline check. `configs/pretrain/simclr_smoke.yaml` uses it
-  with ResNet-18 and one epoch before full pretraining is started.
+  an end-to-end SimCLR pipeline smoke check. `tests/test_ssl_methods.py` checks
+  finite loss, encoder gradients, and update hooks for all five objectives.
 - `scripts/train_downstream.py` supports supervised training, SSL frozen linear
   probes, and SSL fine-tuning. Linear probes extract frozen train/development
   features once before fitting the five-label head. Runs accept persisted
@@ -395,6 +396,9 @@ presence alone.
   for each SSL method. ResNet-50 remains an optional higher-compute comparison.
 - The online encoder checkpoint from each method can be reused for every
   downstream label budget and seed.
+- The single-device PyTorch objectives are SimCLR/NT-Xent, MoCo/momentum
+  encoder and queue, BYOL/EMA target, NNCLR/nearest-neighbor support queue, and
+  SwAV/prototype assignment with Sinkhorn normalization over two global views.
 - Pretraining manifests now contain every available view for training patients
   only, keeping development patients out of SSL representation learning.
 - Downstream comparisons must point each method to the same persisted patient
@@ -404,12 +408,13 @@ presence alone.
 ### Deferred implementation and operational requirements
 
 - Gradient accumulation, warmup, LARS, iterative multilabel stratification,
-  run-duration/peak-memory logging, final-AUROC paired-difference bootstrap,
-  calibration, plot generation, retrieval, UMAP/t-SNE, and Grad-CAM are not
+  pretraining peak-memory logging, final paired-difference bootstrap,
+  calibration, report plots, retrieval, UMAP/t-SNE, and Grad-CAM are not
   implemented yet.
-- The existing unit tests cover uncertainty conversion, patient-overlap checks,
-  patient budgets, NT-Xent finiteness, and basic multi-label metrics. The
-  remaining checks in Section 9 still need implementation.
-- Before any expensive run, execute the test suite and smoke each SSL objective,
-  inspect `augmentation_pairs.png`, review VLM provenance/license/overlap risk,
-  and lock a configuration on development data before final evaluation.
+- Unit tests cover uncertainty conversion, patient overlap, patient budgets,
+  NT-Xent, basic multilabel metrics, and forward/backward checks for all five
+  SSL objectives. Run the full suite and an end-to-end GPU smoke test in the
+  training environment before long jobs.
+- Before expensive runs, inspect `augmentation_pairs.png`, review VLM
+  provenance/license/overlap risk, and lock configurations on development data
+  before final evaluation.
