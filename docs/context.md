@@ -362,6 +362,9 @@ presence alone.
 - `scripts/train_pretrain.py` trains the selected backbone with SimCLR, writes conservative
   two-view augmentation samples, and saves `best.pt`, `last.pt`, and loss
   history. Horizontal flip is explicitly configurable and disabled by default.
+- `scripts/prepare_smoke_manifest.py` creates a bounded unlabeled manifest for
+  a short SimCLR pipeline check. `configs/pretrain/simclr_smoke.yaml` uses it
+  with ResNet-18 and one epoch before full pretraining is started.
 - `scripts/train_downstream.py` supports `supervised`, `simclr_linear`, and
   `simclr_finetune` modes, accepts persisted sampled-patient JSON files, uses
   subset-specific positive weights, selects checkpoints by development macro

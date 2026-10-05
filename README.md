@@ -38,6 +38,19 @@ Do not use it for model or prompt selection.
 
 ## Train the image-only study
 
+Before full pretraining, run the tests and a short SimCLR check. The smoke
+manifest contains at most 256 records and is written under ignored generated
+data. Inspect `outputs/smoke/simclr-resnet18/augmentation_pairs.png` before
+starting the full schedule.
+
+```bash
+pytest
+python scripts/prepare_smoke_manifest.py
+python scripts/train_pretrain.py --config configs/pretrain/simclr_smoke.yaml
+```
+
+After reviewing the augmentation pairs, launch the configured training runs:
+
 ```powershell
 python scripts/train_pretrain.py --config configs/pretrain/simclr.yaml
 python scripts/train_downstream.py --config configs/downstream/supervised.yaml
