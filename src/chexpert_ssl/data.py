@@ -91,6 +91,23 @@ def assert_patient_disjoint(*frames: pd.DataFrame) -> None:
                 )
 
 
+def exclude_development_patients(
+    pretrain_manifest: pd.DataFrame, development_manifest: pd.DataFrame
+) -> tuple[pd.DataFrame, int]:
+    """Remove development patients from an existing pretraining manifest."""
+    for label, frame in (("pretraining", pretrain_manifest), ("development", development_manifest)):
+        if "patient_id" not in frame.columns:
+            raise ValueError(f"{label} manifest must contain a patient_id column")
+    development_ids = set(development_manifest["patient_id"].astype(str))
+    mask = ~pretrain_manifest["patient_id"].astype(str).isin(development_ids)
+    filtered = pretrain_manifest.loc[mask].copy().reset_index(drop=True)
+    if filtered.empty:
+        raise ValueError("No pretraining rows remain after excluding development patients")
+    assert_patient_disjoint(filtered, development_manifest)
+    removed = pretrain_manifest.loc[~mask, "patient_id"].astype(str).nunique()
+    return filtered, int(removed)
+
+
 def split_by_patient(frame: pd.DataFrame, dev_fraction: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create a deterministic patient-disjoint development partition.
 

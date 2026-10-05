@@ -1,6 +1,6 @@
 seed: 42
 device: auto
-manifest: data/processed/manifests/pretrain_train.csv
+manifest: data/processed/manifests/pretrain_train_leakage_free.csv
 output_dir: outputs/pretrain/simclr-resnet18-seed42
 encoder: resnet18
 method: simclr

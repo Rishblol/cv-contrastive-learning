@@ -1,7 +1,7 @@
 seed: 42
 device: auto
 method: swav
-manifest: data/processed/manifests/pretrain_train.csv
+manifest: data/processed/manifests/pretrain_train_leakage_free.csv
 output_dir: outputs/pretrain/swav-resnet18-seed42
 encoder: resnet18
 image_size: 128

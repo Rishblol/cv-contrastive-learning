@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source",
         type=Path,
-        default=Path("data/processed/manifests/pretrain_train.csv"),
+        default=Path("data/processed/manifests/pretrain_train_leakage_free.csv"),
     )
     parser.add_argument(
         "--output",

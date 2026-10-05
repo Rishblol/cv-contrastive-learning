@@ -345,6 +345,10 @@ final-validation result is implied by code presence alone.
   current patient split is deterministic shuffled assignment rather than
   iterative multi-label stratification; prevalence reporting documents the
   resulting distribution.
+- For previously prepared data, `scripts/repair_pretrain_manifest.py` creates a
+  separate development-patient-free pretraining manifest from the existing
+  pretraining and development CSVs. It does not open images or modify cohort
+  files; pretraining configs point to this repaired manifest.
 - Each training/evaluation output receives `run_metadata.json` with the full
   configuration, command, Git revision, Python/PyTorch versions, CUDA status,
   hardware identifier, and timestamp.

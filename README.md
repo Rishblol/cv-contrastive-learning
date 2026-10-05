@@ -31,8 +31,16 @@ Pretraining uses every view from training patients only; development patients
 are excluded from both SSL and downstream training. The official validation
 partition must not be used for model selection.
 
-If these manifests were generated before this pipeline update, rerun
-`prepare_data.py` once so `pretrain_train.csv` excludes development patients.
+If these manifests were generated before this pipeline update, repair the
+existing pretraining manifest instead of rerunning the image scan:
+
+```bash
+python scripts/repair_pretrain_manifest.py
+```
+
+This writes `pretrain_train_leakage_free.csv` and a repair report. It leaves the
+source manifest and saved patient cohorts unchanged. All five pretraining YAML
+configs and the smoke-manifest helper use the repaired manifest by default.
 
 If the manifests and cohorts are already prepared, continue with tests and the
 short smoke run. The smoke config uses a small ResNet-18 and one epoch:
