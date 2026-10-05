@@ -96,20 +96,21 @@ must be identical across methods in a comparison.
 
 - Pretrain only on images from the training partition; do not use downstream labels.
 - Use the method-specific projection/prediction heads and objective for SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. Downstream transfer uses the online encoder only.
-- Share the data partition, two-view augmentation policy, optimizer family, and encoder architecture across methods. Method-specific temperatures, queues, momentum, and prototypes are configuration values.
-- Use mixed precision when CUDA is available, AdamW, and a cosine learning-rate schedule. The default starting point is batch size 16, 128-pixel input, and 30 epochs; adjust only after recording a short smoke-run throughput and memory profile.
+- Share the data partition, GPU-side two-view augmentation policy, optimizer family, batch size, and encoder architecture across methods. Method-specific temperatures, queues, momentum, and prototypes are configuration values.
+- Decode and resize images once into a reusable memory-mapped grayscale uint8 cache, then perform batched augmentations on the training device. The 128 x 128 cache is about 3.1 GiB for the current manifest.
+- Use mixed precision, channels-last layout, TF32, fused AdamW, and a cosine learning-rate schedule when CUDA is available. Defaults are batch size 64, 128-pixel input, and 30 epochs; if memory is insufficient, lower batch size identically for all five methods.
 - Save resumable per-epoch checkpoints and the exact configuration.
 
 ### X-ray-safe augmentation policy
 
 All five SSL methods use two independently augmented views of each image. X-ray transformations must preserve clinically meaningful anatomy.
 
-- Use random resized crops (scale 0.75–1.0), modest rotation/translation, mild brightness/contrast changes, and occasional 3-pixel Gaussian blur.
+- Use random resized crops (scale 0.6–1.0, aspect ratio 0.85–1.18), modest rotation/translation, mild brightness/contrast changes, occasional Gaussian blur, and low-amplitude noise.
 - Do not apply hue or saturation changes to grayscale radiographs.
 - Avoid aggressive crops, large rotations, posterization, or cutout transforms that can remove pathology-bearing regions.
 - Treat horizontal flipping as a configurable ablation. The default primary protocol should disable it because laterality can be clinically informative.
 
-The current torchvision pipeline decodes images from disk on each pass rather than maintaining a full-dataset array cache. This reduces extra disk requirements but makes throughput dependent on storage and DataLoader workers. Training saves example pairs of augmented views before full runs; inspect them for anatomical plausibility.
+The training script creates `data/processed/cache/pretrain_gray_128.npy` on its first run using bounded decode batches and reuses it for subsequent methods. It saves example pairs of GPU-augmented views before full runs; inspect them for anatomical plausibility.
 
 The implementations use two global views for all five methods. SwAV does not use multi-crop in this study. The MoCo implementation uses a momentum encoder and queue in the single-device workflow; results should be reported with this implementation detail rather than described as a distributed multi-GPU run.
 
@@ -191,7 +192,7 @@ These are starting points, not results to tune against the official validation s
 | SSL encoder | ResNet-18 default; ResNet-50 optional |
 | SSL epochs | 30 initial compute-conscious default |
 | SSL temperature | 0.1 to 0.2, selected on development protocol |
-| SSL batch size | 16 default; increase if GPU memory and throughput allow |
+| SSL batch size | 64 default; decrease consistently across methods if GPU memory is insufficient |
 | Downstream epochs | Up to 50 with development-set early stopping |
 | Fine-tuning optimizer | AdamW with discriminative or lower encoder learning rate |
 | Linear-probe optimizer | AdamW |
@@ -398,6 +399,11 @@ final-validation result is implied by code presence alone.
 
 - Separate YAML configs define the shared default ResNet-18 pretraining setup
   for each SSL method. ResNet-50 remains an optional higher-compute comparison.
+- Pretraining now shares a disk-backed 128 x 128 grayscale cache and GPU-side
+  two-view augmentation. CUDA runs use pinned/prefetched batches, channels-last
+  layout, autocast, TF32, cuDNN benchmarking, and fused AdamW; progress logs
+  report throughput and GPU memory. These settings improve input utilization,
+  but actual throughput must be measured on the target pod.
 - The online encoder checkpoint from each method can be reused for every
   downstream label budget and seed.
 - The single-device PyTorch objectives are SimCLR/NT-Xent, MoCo/momentum

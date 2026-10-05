@@ -51,14 +51,14 @@ python scripts/prepare_smoke_manifest.py
 python scripts/train_pretrain.py --config configs/pretrain/simclr_smoke.yaml
 ```
 
-Inspect `outputs/smoke/simclr-resnet18/augmentation_pairs.png` before full
+Inspect `outputs/smoke/simclr-resnet18-gpu-cache/augmentation_pairs.png` before full
 training.
 
 ## Pretrain the five methods
 
 Each method has its own resumable config and checkpoint directory. Defaults use
-ResNet-18, 128-pixel images, batch size 16, and 30 epochs to fit a modest GPU.
-Run them individually; completed epochs are saved in `last.pt`.
+ResNet-18, 128-pixel images, batch size 64, and 30 epochs. Run them individually;
+completed epochs are saved in `last.pt`.
 
 ```bash
 python scripts/train_pretrain.py --config configs/pretrain/simclr.yaml
@@ -68,12 +68,20 @@ python scripts/train_pretrain.py --config configs/pretrain/nnclr.yaml
 python scripts/train_pretrain.py --config configs/pretrain/swav.yaml
 ```
 
-All five methods use the same PIL/torchvision two-view data pipeline and
-ResNet-18 input settings. Images are decoded from disk during training rather
-than stored as a full-dataset cache, which avoids a large extra cache but makes
-storage throughput and `num_workers` affect epoch time. `train_pretrain.py`
-prints periodic step loss and per-epoch duration; use those measurements to
-adjust the YAML batch size/epoch count before committing to the full schedule.
+All methods share the same preprocessed cache and GPU-side augmentation
+settings. The first run builds a reusable 128 x 128 grayscale uint8 cache at
+`data/processed/cache/pretrain_gray_128.npy` (about 3.1 GiB for the current
+manifest); the other methods reuse it. Keep this cache on fast pod storage. The
+training loop uses pinned-memory batches, prefetch workers, channels-last
+convolutions, mixed precision, TF32, and fused AdamW when CUDA is active. Logs
+show the selected GPU, steps/second, allocated GPU memory, epoch duration, and
+images/second. If batch size 64 does not fit, lower it in all five configs to
+the same value (start with 32).
+
+The optimized configs use separate `*-gpu-cache-*` output directories, so the
+old one-epoch SimCLR checkpoint will not be resumed with the new augmentation
+and batching settings. The first full config run includes cache construction;
+subsequent pretraining methods reuse the completed cache.
 
 ## Downstream comparisons
 
