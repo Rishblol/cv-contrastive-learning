@@ -1,6 +1,7 @@
 architectures:
   - resnet18
   - resnet50
-default_encoder: resnet18
-default_image_size: 128
-default_pretrained: false
+encoder: resnet18
+image_size: 128
+imagenet_pretrained: false
+imagenet_weights: IMAGENET1K_V1

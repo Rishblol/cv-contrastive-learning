@@ -64,13 +64,19 @@ def aggregate_prompt_embeddings(
     result: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for label in TARGETS:
         specification = prompt_set[label]
-        positive = F.normalize(model.text_features(specification["positive"], device).mean(dim=0), dim=0)
-        negative = F.normalize(model.text_features(specification["negative"], device).mean(dim=0), dim=0)
+        positive = F.normalize(
+            model.text_features(specification["positive"], device).mean(dim=0), dim=0
+        )
+        negative = F.normalize(
+            model.text_features(specification["negative"], device).mean(dim=0), dim=0
+        )
         result[label] = (positive, negative)
     return result
 
 
-def zero_shot_scores(image_embeddings: torch.Tensor, concepts: dict[str, tuple[torch.Tensor, torch.Tensor]]) -> np.ndarray:
+def zero_shot_scores(
+    image_embeddings: torch.Tensor, concepts: dict[str, tuple[torch.Tensor, torch.Tensor]]
+) -> np.ndarray:
     """Two-class softmax probability for each pathology; labels never enter this function."""
     images = F.normalize(image_embeddings, dim=-1)
     scores = []

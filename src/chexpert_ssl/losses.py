@@ -6,7 +6,9 @@ import torch
 from torch.nn import functional as F
 
 
-def nt_xent_loss(view_one: torch.Tensor, view_two: torch.Tensor, temperature: float = 0.2) -> torch.Tensor:
+def nt_xent_loss(
+    view_one: torch.Tensor, view_two: torch.Tensor, temperature: float = 0.2
+) -> torch.Tensor:
     """Normalized temperature-scaled cross-entropy loss for paired SimCLR views."""
     if view_one.shape != view_two.shape:
         raise ValueError("SimCLR views must have identical embedding shapes")

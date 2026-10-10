@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
+from chexpert_ssl.data import read_manifest, reject_final_partition
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,7 +31,8 @@ def main() -> None:
     if not args.source.is_file():
         raise FileNotFoundError(f"Prepared pretraining manifest not found: {args.source}")
 
-    frame = pd.read_csv(args.source)
+    frame = read_manifest(args.source, labeled=False)
+    reject_final_partition(args.source, frame)
     if frame.empty:
         raise ValueError(f"Prepared pretraining manifest is empty: {args.source}")
     smoke_frame = frame.head(args.records)

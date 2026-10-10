@@ -7,7 +7,9 @@ from torch import nn
 from torchvision import models as vision_models
 
 
-def build_encoder(name: str = "resnet50", pretrained: bool = False) -> tuple[nn.Module, int]:
+def build_encoder(
+    name: str = "resnet18", pretrained: bool = False, weights_name: str | None = None
+) -> tuple[nn.Module, int]:
     """Return a supported torchvision backbone that emits one feature vector per image."""
     constructors = {
         "resnet18": (vision_models.resnet18, vision_models.ResNet18_Weights),
@@ -21,7 +23,10 @@ def build_encoder(name: str = "resnet50", pretrained: bool = False) -> tuple[nn.
         raise ValueError(f"Unsupported encoder {name!r}; choose one of: {supported}")
 
     constructor, weight_enum = constructors[name]
-    model = constructor(weights=weight_enum.DEFAULT if pretrained else None)
+    weights = None
+    if pretrained:
+        weights = weight_enum[weights_name] if weights_name else weight_enum.DEFAULT
+    model = constructor(weights=weights)
     if name.startswith("resnet"):
         features = model.fc.in_features
         model.fc = nn.Identity()
@@ -38,7 +43,9 @@ def build_encoder(name: str = "resnet50", pretrained: bool = False) -> tuple[nn.
 
 
 class SimCLRModel(nn.Module):
-    def __init__(self, encoder_name: str, projection_dim: int = 128, pretrained: bool = False) -> None:
+    def __init__(
+        self, encoder_name: str, projection_dim: int = 128, pretrained: bool = False
+    ) -> None:
         super().__init__()
         self.encoder, feature_dim = build_encoder(encoder_name, pretrained=pretrained)
         self.projector = nn.Sequential(
@@ -58,9 +65,12 @@ class MultiLabelClassifier(nn.Module):
         num_labels: int,
         freeze_encoder: bool = False,
         pretrained: bool = False,
+        weights_name: str | None = None,
     ) -> None:
         super().__init__()
-        self.encoder, feature_dim = build_encoder(encoder_name, pretrained=pretrained)
+        self.encoder, feature_dim = build_encoder(
+            encoder_name, pretrained=pretrained, weights_name=weights_name
+        )
         self.classifier = nn.Linear(feature_dim, num_labels)
         if freeze_encoder:
             self.freeze_encoder()

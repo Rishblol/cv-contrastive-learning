@@ -1,0 +1,12 @@
+extends: simclr_linear.yaml
+train_manifest: data/processed/smoke/downstream_train.csv
+development_manifest: data/processed/smoke/development.csv
+sampled_patients: data/processed/smoke/cohort.json
+label_fraction: 1.0
+ssl_checkpoint: outputs/smoke/simclr-resnet18-gpu-cache/best.pt
+output_dir: outputs/smoke/downstream-linear
+epochs: 1
+early_stopping_patience: 1
+batch_size: 8
+num_workers: 0
+resume: false

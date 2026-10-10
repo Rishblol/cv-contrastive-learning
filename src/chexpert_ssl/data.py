@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable, Iterable
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,68 @@ FRONTAL_VIEWS = frozenset({"AP", "PA"})
 
 _PATIENT_RE = re.compile(r"patient(\d+)", re.IGNORECASE)
 _STUDY_RE = re.compile(r"study(\d+)", re.IGNORECASE)
+
+
+def read_manifest(path: str | Path, *, labeled: bool = True) -> pd.DataFrame:
+    """Load prepared records without losing zero-padded patient/study identifiers."""
+    frame = pd.read_csv(path, dtype={"patient_id": "string", "study_id": "string"})
+    required = {"patient_id", "image_path"}
+    if labeled:
+        required.update(target_columns())
+    missing = required.difference(frame.columns)
+    if missing or frame.empty:
+        raise ValueError(f"Invalid or empty manifest {path}; missing columns: {sorted(missing)}")
+    if frame[list(required)].isna().any().any():
+        raise ValueError(f"Manifest {path} contains missing identifiers, paths, or targets")
+    if labeled and not frame[target_columns()].isin([0, 1]).all().all():
+        raise ValueError(f"Manifest {path} must contain binary resolved targets")
+    if labeled:
+        for label in TARGETS:
+            if label in frame:
+                expected = frame[label].map(
+                    lambda value, target=label: resolve_target(value, target)
+                )
+                if not expected.eq(frame[f"target_{label}"]).all():
+                    raise ValueError(
+                        f"Resolved {label} targets do not match the primary uncertainty policy"
+                    )
+    if "Path" in frame:
+        expected = frame["Path"].map(
+            lambda value: extract_identifier(value, _PATIENT_RE, "patient ID")
+        )
+        if not expected.eq(frame.patient_id).all():
+            raise ValueError(f"Manifest {path} has patient IDs inconsistent with source paths")
+    return frame
+
+
+def reject_final_partition(path: str | Path, frame: pd.DataFrame) -> None:
+    """Prevent official-validation records from entering a training/selection stage."""
+    if Path(path).name in {"valid.csv", "final_validation.csv"}:
+        raise ValueError("Official validation cannot be used for training or development selection")
+    paths = frame.image_path.astype(str).str.replace("\\", "/", regex=False)
+    if paths.str.contains(r"(?:^|/)valid/", regex=True).any():
+        raise ValueError(
+            "Official validation images cannot be used for training or development selection"
+        )
+
+
+def select_patient_cohort(
+    frame: pd.DataFrame, path: str | Path, fraction: float, seed: int
+) -> pd.DataFrame:
+    """Require and validate the persisted patient cohort shared by all methods."""
+    cohort = json.loads(Path(path).read_text(encoding="utf-8"))
+    if cohort.get("seed") != seed or cohort.get("label_fraction") != fraction:
+        raise ValueError("Cohort seed/budget does not match the run configuration")
+    identifiers = cohort.get("patient_ids", [])
+    if not identifiers or any(not isinstance(value, str) for value in identifiers):
+        raise ValueError("Cohort must contain nonempty string patient IDs")
+    patients = set(identifiers)
+    if len(patients) != len(identifiers) or not patients.issubset(set(frame.patient_id)):
+        raise ValueError("Cohort contains duplicate or unknown patient IDs")
+    expected_count = max(1, round(frame.patient_id.nunique() * fraction))
+    if len(patients) != expected_count:
+        raise ValueError("Cohort patient count does not match the configured budget")
+    return frame.loc[frame.patient_id.isin(patients)].reset_index(drop=True)
 
 
 def resolve_target(value: object, target: str) -> int:
@@ -53,7 +116,9 @@ def extract_identifier(raw_path: str, pattern: re.Pattern[str], label: str) -> s
     return match.group(1)
 
 
-def prepare_manifest(csv_path: Path, dataset_root: Path, frontal_only: bool = False) -> pd.DataFrame:
+def prepare_manifest(
+    csv_path: Path, dataset_root: Path, frontal_only: bool = False
+) -> pd.DataFrame:
     """Load a CheXpert manifest and add portable paths, IDs, and resolved targets."""
     frame = pd.read_csv(csv_path)
     required = {"Path", "Frontal/Lateral", *TARGETS}
@@ -74,7 +139,9 @@ def prepare_manifest(csv_path: Path, dataset_root: Path, frontal_only: bool = Fa
         lambda path: extract_identifier(path, _STUDY_RE, "study ID")
     )
     for target in TARGETS:
-        frame[f"target_{target}"] = frame[target].map(lambda value: resolve_target(value, target))
+        frame[f"target_{target}"] = frame[target].map(
+            lambda value, label=target: resolve_target(value, label)
+        )
     return frame.reset_index(drop=True)
 
 
@@ -108,7 +175,9 @@ def exclude_development_patients(
     return filtered, int(removed)
 
 
-def split_by_patient(frame: pd.DataFrame, dev_fraction: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_by_patient(
+    frame: pd.DataFrame, dev_fraction: float, seed: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create a deterministic patient-disjoint development partition.
 
     Patients are assigned using a shuffled order, rather than individual studies,
@@ -118,9 +187,11 @@ def split_by_patient(frame: pd.DataFrame, dev_fraction: float, seed: int) -> tup
     if not 0 < dev_fraction < 1:
         raise ValueError("dev_fraction must be between 0 and 1")
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
+    if len(patients) < 2:
+        raise ValueError("At least two patients are required for a train/development split")
     rng = np.random.default_rng(seed)
     rng.shuffle(patients)
-    dev_count = max(1, int(round(len(patients) * dev_fraction)))
+    dev_count = min(len(patients) - 1, max(1, round(len(patients) * dev_fraction)))
     dev_patients = set(patients[:dev_count])
     dev = frame.loc[frame["patient_id"].astype(str).isin(dev_patients)].copy()
     train = frame.loc[~frame["patient_id"].astype(str).isin(dev_patients)].copy()
@@ -135,28 +206,34 @@ def sample_patient_budget(frame: pd.DataFrame, fraction: float, seed: int) -> pd
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
     rng = np.random.default_rng(seed)
     rng.shuffle(patients)
-    count = max(1, int(round(len(patients) * fraction)))
+    count = max(1, round(len(patients) * fraction))
     chosen = set(patients[:count])
     return frame.loc[frame["patient_id"].astype(str).isin(chosen)].reset_index(drop=True)
 
 
-def nested_patient_ids(frame: pd.DataFrame, fractions: Iterable[float], seed: int) -> dict[float, list[str]]:
+def nested_patient_ids(
+    frame: pd.DataFrame, fractions: Iterable[float], seed: int
+) -> dict[float, list[str]]:
     """Return nested deterministic patient samples for every requested budget."""
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
     rng = np.random.default_rng(seed)
     rng.shuffle(patients)
     result: dict[float, list[str]] = {}
-    for fraction in sorted(set(float(value) for value in fractions)):
+    for fraction in sorted({float(value) for value in fractions}):
         if not 0 < fraction <= 1:
             raise ValueError("All fractions must be in (0, 1]")
-        count = max(1, int(round(len(patients) * fraction)))
+        count = max(1, round(len(patients) * fraction))
         result[fraction] = patients[:count].tolist()
     return result
 
 
 def manifest_hash(frame: pd.DataFrame) -> str:
     """Stable content hash used to tie artifacts back to their source manifest."""
-    columns = [column for column in ("Path", "image_path", "patient_id", *target_columns()) if column in frame]
+    columns = [
+        column
+        for column in ("Path", "image_path", "patient_id", *target_columns())
+        if column in frame
+    ]
     payload = frame[columns].sort_values(columns).to_csv(index=False).encode("utf-8")
     return sha256(payload).hexdigest()
 
@@ -203,10 +280,18 @@ class SimCLRDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         return self.transform(image), self.transform(image)
 
 
-def supervised_transform(image_size: int, train: bool) -> transforms.Compose:
+def supervised_transform(
+    image_size: int, train: bool, config: dict | None = None
+) -> transforms.Compose:
+    config = config or {}
     operations: list[Callable] = [transforms.Resize((image_size, image_size))]
     if train:
-        operations.append(transforms.RandomAffine(degrees=5, translate=(0.02, 0.02)))
+        operations.append(
+            transforms.RandomAffine(
+                degrees=float(config.get("rotation", 5)),
+                translate=tuple(config.get("translation", (0.02, 0.02))),
+            )
+        )
     operations.extend(
         [
             transforms.ToTensor(),
@@ -219,12 +304,12 @@ def supervised_transform(image_size: int, train: bool) -> transforms.Compose:
 def simclr_transform(image_size: int, horizontal_flip: bool = False) -> transforms.Compose:
     """Conservative radiograph augmentation policy; no hue/saturation or flip."""
     operations: list[Callable] = [
-            transforms.RandomResizedCrop(image_size, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
-            transforms.RandomAffine(degrees=5, translate=(0.03, 0.03)),
-            transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15)], p=0.8),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        transforms.RandomResizedCrop(image_size, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
+        transforms.RandomAffine(degrees=5, translate=(0.03, 0.03)),
+        transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15)], p=0.8),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
     ]
     if horizontal_flip:
         operations.insert(2, transforms.RandomHorizontalFlip())

@@ -44,8 +44,17 @@ def main() -> None:
             all_scores.append(zero_shot_scores(embeddings, concepts))
     scores = np.concatenate(all_scores)
     targets = frame[target_columns()].to_numpy(dtype=np.float32)
-    save_json(output_dir / "metrics.json", {**multilabel_metrics(targets, scores), "calibrated": False, "prompt_set": config["prompt_set"]})
-    output = frame[["image_path", "patient_id", "study_id", "Frontal/Lateral", *target_columns()]].copy()
+    save_json(
+        output_dir / "metrics.json",
+        {
+            **multilabel_metrics(targets, scores),
+            "calibrated": False,
+            "prompt_set": config["prompt_set"],
+        },
+    )
+    output = frame[
+        ["image_path", "patient_id", "study_id", "Frontal/Lateral", *target_columns()]
+    ].copy()
     for index, label in enumerate(TARGETS):
         output[f"probability_{label}"] = scores[:, index]
     output.to_csv(output_dir / "predictions.csv", index=False)

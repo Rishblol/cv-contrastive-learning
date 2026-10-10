@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
-
-from chexpert_ssl.data import exclude_development_patients, manifest_hash
+from chexpert_ssl.data import (
+    exclude_development_patients,
+    manifest_hash,
+    read_manifest,
+    reject_final_partition,
+)
 from chexpert_ssl.utils import save_json
 
 
@@ -36,11 +39,16 @@ def main() -> None:
     for source in (args.pretrain_manifest, args.development_manifest):
         if not source.is_file():
             raise FileNotFoundError(f"Manifest not found: {source}")
-    if args.output.resolve() in {args.pretrain_manifest.resolve(), args.development_manifest.resolve()}:
+    if args.output.resolve() in {
+        args.pretrain_manifest.resolve(),
+        args.development_manifest.resolve(),
+    }:
         raise ValueError("Output must be a separate file; source manifests will not be overwritten")
 
-    pretrain = pd.read_csv(args.pretrain_manifest)
-    development = pd.read_csv(args.development_manifest)
+    pretrain = read_manifest(args.pretrain_manifest, labeled=False)
+    development = read_manifest(args.development_manifest, labeled=False)
+    reject_final_partition(args.pretrain_manifest, pretrain)
+    reject_final_partition(args.development_manifest, development)
     repaired, removed_patients = exclude_development_patients(pretrain, development)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     repaired.to_csv(args.output, index=False)

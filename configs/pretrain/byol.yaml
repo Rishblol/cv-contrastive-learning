@@ -1,38 +1,5 @@
-seed: 42
-device: auto
+extends: defaults.yaml
 method: byol
-manifest: data/processed/manifests/pretrain_train_leakage_free.csv
-cache_path: data/processed/cache/pretrain_gray_128.npy
 output_dir: outputs/pretrain/byol-resnet18-gpu-cache-seed42
-encoder: resnet18
-image_size: 128
-batch_size: 64
-num_workers: 8
-prefetch_factor: 4
-cache_workers: 16
-torch_num_threads: 4
-channels_last: true
-cudnn_benchmark: true
-allow_tf32: true
-deterministic: false
-fused_optimizer: true
-epochs: 30
-learning_rate: 0.0003
-weight_decay: 0.0001
-resume: true
-augmentation:
-  scale: [0.6, 1.0]
-  ratio: [0.85, 1.18]
-  rotation: 10.0
-  translation: 0.05
-  brightness: 0.1
-  contrast: 0.2
-  blur_probability: 0.5
-  blur_sigma: [0.1, 1.5]
-  noise_probability: 0.5
-  noise_std: 0.02
-  horizontal_flip: false
 ssl:
-  hidden_dim: 512
-  projection_dim: 128
   momentum: 0.99

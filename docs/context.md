@@ -428,3 +428,79 @@ final-validation result is implied by code presence alone.
 - Before expensive runs, inspect `augmentation_pairs.png`, review VLM
   provenance/license/overlap risk, and lock configurations on development data
   before final evaluation.
+
+## 14. Image-only pipeline hardening (2026-10-10)
+
+The five primary objectives remain SimCLR, MoCo v2, BYOL, NNCLR, and SwAV.
+They inherit one shared YAML protocol, with ResNet-18/128 as the default and
+ResNet-50 available as a separate comparison. `configs/experiments/label_efficiency.yaml`
+defines five reusable pretraining runs and the 180 downstream runs specified in
+Section 6. The three downstream seeds reuse the seed-42 pretrained encoder for
+each method; reported downstream seed variance does not represent pretraining
+seed variance. Plan generation validates shared settings and does not launch
+training or final evaluation.
+
+### Data and cohort corrections
+
+- Prepared CSVs preserve string patient/study IDs, including leading zeros.
+  Training requires persisted cohort JSON and verifies its seed, fraction,
+  patient count, unique IDs, and membership. Train/development overlap and
+  official-validation paths are rejected before training.
+- Fresh preparation partitions all training patients before downstream view
+  filtering, retaining lateral-only training patients in the SSL pool. It writes
+  the canonical `pretrain_train_leakage_free.csv` and the compatibility alias
+  `pretrain_train.csv`. Existing cohorts are reused; regeneration requires an
+  explicit overwrite and constitutes a new prepared study.
+- Historical cohorts are not rewritten. The repair helper remains available for
+  older pretraining manifests. Small downstream smoke artifacts are derived from
+  an existing saved cohort and remain separate from primary experiments.
+
+### Configuration, checkpoints, and final evaluation
+
+- YAML inheritance resolves shared backbone, optimizer, augmentation, precision,
+  and primary uncertainty policy settings. Runs save `resolved_config.json` and
+  full metadata including input hashes, subset-specific positive weights,
+  software versions, start/end times, completion status, and resource summaries.
+  An implementation digest binds the entry point and package source files,
+  including uncommitted edits, into the resume signature and job-reuse checks.
+- All five methods write atomic resumable checkpoints containing the online
+  encoder, optimizer/scheduler/scaler state, training signature, and RNG state.
+  Downstream checkpoints receive the same compatibility checks and restore
+  epoch-boundary RNG state. Explicit epoch sampling seeds separate worker and
+  shuffle RNG streams. CPU interruption tests check equality after resume;
+  throughput-oriented CUDA defaults do not imply bitwise reproducibility.
+- SwAV Sinkhorn assignments use float32 log-space normalization to avoid
+  exponential overflow under mixed precision; this preserves the two-global-view
+  objective and does not introduce a new SSL method.
+- Frozen image-only probes keep the encoder in evaluation mode and fit only the
+  classification head. All downstream checkpoint selection and threshold
+  fitting use development records. Best checkpoints embed their thresholds.
+- `scripts/lock_selection.py` records a development-only selection decision and
+  binds the checkpoint, thresholds, configuration signature, and development
+  metric artifact. Locking does not inspect official-validation data. Selected
+  training runs are immutable.
+- Final evaluation requires a matching lock and thresholds, derives model and
+  preprocessing settings from the selected checkpoint, checks patient
+  disjointness, and writes training-run lineage into its artifacts. The runner
+  verifies every requested lock before reading official-validation records.
+  It reuses completed evaluation artifacts rather than silently reevaluating.
+- Aggregation explicitly separates `development` and `final_validation`, retains
+  initialization/protocol/budget/seed identity, and rejects duplicate paired
+  results. It scans evaluation artifacts even when they are beneath reports.
+  Final predictions retain AP/PA, age, and sex where available for later analyses.
+
+### Operational sequence and remaining scope
+
+Use the README's staged `prepare -> smoke -> pretrain -> downstream -> lock ->
+evaluate -> aggregate` workflow. Before full pretraining, the runner requires
+completed test/smoke artifacts and an explicit anatomical augmentation review.
+Generated plans are immutable, failed jobs stop the sequence, and concurrent
+writes to an individual run are rejected.
+
+This update hardens the image-only lifecycle. VLM checkpoint review, adapter
+compatibility, VLM lifecycle hardening, calibration, paired-difference bootstrap,
+report plots, retrieval, dimensionality reduction, and attribution remain
+separate work. Pretraining peak-memory logging is implemented, superseding the
+older deferred-status statement in Section 13. Synthetic CPU tests exercise
+small pretraining and downstream jobs; they do not establish CheXpert performance
+or substitute for the documented GPU smoke and human augmentation review.

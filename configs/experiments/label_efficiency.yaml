@@ -1,0 +1,21 @@
+name: chexpert-label-efficiency
+data_config: configs/data/prepare.yaml
+generated_dir: outputs/plans/label-efficiency
+pretrain_configs:
+  simclr: configs/pretrain/simclr.yaml
+  moco: configs/pretrain/moco.yaml
+  byol: configs/pretrain/byol.yaml
+  nnclr: configs/pretrain/nnclr.yaml
+  swav: configs/pretrain/swav.yaml
+downstream_templates:
+  ssl_linear: configs/downstream/simclr_linear.yaml
+  ssl_finetune: configs/downstream/simclr_finetune.yaml
+  scratch: configs/downstream/supervised.yaml
+  imagenet: configs/downstream/imagenet.yaml
+budgets: [0.01, 0.05, 0.10, 0.25, 1.0]
+seeds: [42, 43, 44]
+splits_dir: data/processed/splits
+downstream_output_root: outputs/downstream
+evaluation_output_root: outputs/evaluation
+final_manifest: data/processed/manifests/final_validation.csv
+bootstrap_samples: 1000

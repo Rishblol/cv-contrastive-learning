@@ -1,0 +1,13 @@
+extends: models/backbones.yaml
+seed: 42
+device: auto
+optimizer: adamw
+precision: auto
+multiprocessing_context: spawn
+resume: true
+target_policy:
+  Atelectasis: 1
+  Cardiomegaly: 0
+  Consolidation: 0
+  Edema: 1
+  Pleural Effusion: 0

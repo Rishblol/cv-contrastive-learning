@@ -25,7 +25,7 @@ vlm = ["transformers>=4.44", "safetensors>=0.4"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]

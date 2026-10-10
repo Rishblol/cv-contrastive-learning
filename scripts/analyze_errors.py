@@ -27,7 +27,21 @@ def main() -> None:
             truth = record[f"target_{label}"]
             predicted = int(probability >= float(thresholds[label]))
             if predicted != truth:
-                rows.append({"run_id": args.run_id, "image_id": record["image_path"], "patient_id": record["patient_id"], "study_id": record["study_id"], "view": record["Frontal/Lateral"], "label": label, "true_label": truth, "predicted_probability": probability, "selected_threshold": float(thresholds[label]), "attribution_artifact_path": "", "reviewer_observation": ""})
+                rows.append(
+                    {
+                        "run_id": args.run_id,
+                        "image_id": record["image_path"],
+                        "patient_id": record["patient_id"],
+                        "study_id": record["study_id"],
+                        "view": record["Frontal/Lateral"],
+                        "label": label,
+                        "true_label": truth,
+                        "predicted_probability": probability,
+                        "selected_threshold": float(thresholds[label]),
+                        "attribution_artifact_path": "",
+                        "reviewer_observation": "",
+                    }
+                )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(args.output, index=False)
 

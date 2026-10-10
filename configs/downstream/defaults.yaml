@@ -1,0 +1,15 @@
+extends: ../common.yaml
+train_manifest: data/processed/manifests/downstream_train.csv
+development_manifest: data/processed/manifests/development.csv
+sampled_patients: data/processed/splits/budget_0p01_seed_42.json
+label_fraction: 0.01
+batch_size: 16
+num_workers: 4
+torch_num_threads: 4
+epochs: 50
+early_stopping_patience: 10
+weight_decay: 0.0001
+encoder_learning_rate: null
+supervised_augmentation:
+  rotation: 5
+  translation: [0.02, 0.02]

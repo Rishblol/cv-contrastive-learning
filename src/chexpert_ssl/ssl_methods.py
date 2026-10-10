@@ -11,7 +11,6 @@ from torch.nn import functional as F
 
 from chexpert_ssl.models import build_encoder
 
-
 METHODS = ("simclr", "moco", "byol", "nnclr", "swav")
 
 
@@ -38,8 +37,10 @@ def _nt_xent(first: torch.Tensor, second: torch.Tensor, temperature: float) -> t
 
 
 def _info_nce(prediction: torch.Tensor, positive: torch.Tensor, temperature: float) -> torch.Tensor:
-    return F.cross_entropy(prediction @ positive.T / temperature,
-                           torch.arange(prediction.shape[0], device=prediction.device))
+    return F.cross_entropy(
+        prediction @ positive.T / temperature,
+        torch.arange(prediction.shape[0], device=prediction.device),
+    )
 
 
 @torch.no_grad()
@@ -67,8 +68,15 @@ class SimCLR(SSLMethod):
 
 
 class MoCo(SSLMethod):
-    def __init__(self, encoder_name: str, projection_dim: int, hidden_dim: int,
-                 temperature: float, queue_size: int, momentum: float):
+    def __init__(
+        self,
+        encoder_name: str,
+        projection_dim: int,
+        hidden_dim: int,
+        temperature: float,
+        queue_size: int,
+        momentum: float,
+    ):
         super().__init__()
         self.encoder, feature_dim = build_encoder(encoder_name)
         self.projector = _mlp(feature_dim, hidden_dim, projection_dim)
@@ -96,7 +104,9 @@ class MoCo(SSLMethod):
     def _loss(self, query: torch.Tensor, key: torch.Tensor, queue: torch.Tensor) -> torch.Tensor:
         positive = (query * key).sum(dim=1, keepdim=True)
         logits = torch.cat((positive, query @ queue.T), dim=1) / self.temperature
-        return F.cross_entropy(logits, torch.zeros(query.shape[0], dtype=torch.long, device=query.device))
+        return F.cross_entropy(
+            logits, torch.zeros(query.shape[0], dtype=torch.long, device=query.device)
+        )
 
     def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         queue = self.queue.detach().clone()
@@ -142,13 +152,23 @@ class BYOL(SSLMethod):
 
 
 class NNCLR(SSLMethod):
-    def __init__(self, encoder_name: str, projection_dim: int, hidden_dim: int,
-                 temperature: float, queue_size: int):
+    def __init__(
+        self,
+        encoder_name: str,
+        projection_dim: int,
+        hidden_dim: int,
+        temperature: float,
+        queue_size: int,
+    ):
         super().__init__()
         self.encoder, feature_dim = build_encoder(encoder_name)
         self.projector = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim, bias=False), nn.BatchNorm1d(hidden_dim), nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim, bias=False), nn.BatchNorm1d(hidden_dim), nn.ReLU(inplace=True),
+            nn.Linear(feature_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim, bias=False),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, projection_dim),
         )
         self.predictor = _mlp(projection_dim, hidden_dim, projection_dim)
@@ -175,47 +195,74 @@ class NNCLR(SSLMethod):
         h1, h2 = self.projector(self.encoder(first)), self.projector(self.encoder(second))
         z1, z2 = _normalize(h1.detach()), _normalize(h2.detach())
         p1, p2 = _normalize(self.predictor(h1)), _normalize(self.predictor(h2))
-        loss = 0.5 * (_info_nce(p2, self._nearest(z1), self.temperature)
-                      + _info_nce(p1, self._nearest(z2), self.temperature))
+        loss = 0.5 * (
+            _info_nce(p2, self._nearest(z1), self.temperature)
+            + _info_nce(p1, self._nearest(z2), self.temperature)
+        )
         self._enqueue(torch.cat((z1, z2)))
         return loss
 
 
 @torch.no_grad()
 def _sinkhorn(scores: torch.Tensor, epsilon: float, iterations: int = 3) -> torch.Tensor:
-    assignments = torch.exp(scores / epsilon).T
-    assignments /= assignments.sum().clamp_min(1e-12)
+    if epsilon <= 0 or iterations < 1:
+        raise ValueError("Sinkhorn epsilon and iterations must be positive")
+    # Log-space float32 normalization prevents exp overflow under mixed precision.
+    assignments = scores.float().T / epsilon
+    assignments -= torch.logsumexp(assignments.flatten(), dim=0)
     prototypes, batch = assignments.shape
     for _ in range(iterations):
-        assignments /= assignments.sum(dim=1, keepdim=True).clamp_min(1e-12)
-        assignments /= prototypes
-        assignments /= assignments.sum(dim=0, keepdim=True).clamp_min(1e-12)
-        assignments /= batch
-    return (assignments * batch).T
+        assignments -= torch.logsumexp(assignments, dim=1, keepdim=True)
+        assignments -= math.log(prototypes)
+        assignments -= torch.logsumexp(assignments, dim=0, keepdim=True)
+        assignments -= math.log(batch)
+    return torch.exp(assignments + math.log(batch)).T
 
 
 class SwAV(SSLMethod):
-    def __init__(self, encoder_name: str, projection_dim: int, hidden_dim: int,
-                 temperature: float, prototype_count: int, epsilon: float, freeze_steps: int):
+    def __init__(
+        self,
+        encoder_name: str,
+        projection_dim: int,
+        hidden_dim: int,
+        temperature: float,
+        prototype_count: int,
+        epsilon: float,
+        freeze_steps: int,
+    ):
         super().__init__()
         self.encoder, feature_dim = build_encoder(encoder_name)
         self.projector = _mlp(feature_dim, hidden_dim, projection_dim)
-        self.prototypes = nn.Parameter(F.normalize(torch.randn(prototype_count, projection_dim), dim=1))
-        self.temperature, self.epsilon, self.freeze_prototype_steps = temperature, epsilon, freeze_steps
+        self.prototypes = nn.Parameter(
+            F.normalize(torch.randn(prototype_count, projection_dim), dim=1)
+        )
+        self.temperature, self.epsilon, self.freeze_prototype_steps = (
+            temperature,
+            epsilon,
+            freeze_steps,
+        )
         self.register_buffer("step", torch.zeros(1, dtype=torch.long))
 
     def forward(self, first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             self.prototypes.copy_(F.normalize(self.prototypes, dim=1))
-        weight = self.prototypes.detach() if int(self.step) < self.freeze_prototype_steps else self.prototypes
+        weight = (
+            self.prototypes.detach()
+            if int(self.step) < self.freeze_prototype_steps
+            else self.prototypes
+        )
         batch = first.shape[0]
         embeddings = _normalize(self.projector(self.encoder(torch.cat((first, second)))))
         scores = embeddings @ weight.float().T
         first_scores, second_scores = scores[:batch], scores[batch:]
         first_assign = _sinkhorn(first_scores.detach(), self.epsilon)
         second_assign = _sinkhorn(second_scores.detach(), self.epsilon)
-        loss1 = -(first_assign * F.log_softmax(second_scores / self.temperature, dim=1)).sum(1).mean()
-        loss2 = -(second_assign * F.log_softmax(first_scores / self.temperature, dim=1)).sum(1).mean()
+        loss1 = (
+            -(first_assign * F.log_softmax(second_scores / self.temperature, dim=1)).sum(1).mean()
+        )
+        loss2 = (
+            -(second_assign * F.log_softmax(first_scores / self.temperature, dim=1)).sum(1).mean()
+        )
         return 0.5 * (loss1 + loss2)
 
     def after_optimizer_step(self, progress: float) -> None:
@@ -227,19 +274,32 @@ def build_ssl_method(name: str, encoder_name: str, config: dict) -> SSLMethod:
     """Build one method from the common YAML SSL settings."""
     if name not in METHODS:
         raise ValueError(f"Unknown SSL method {name!r}; choose from {', '.join(METHODS)}")
-    common = (encoder_name, int(config.get("projection_dim", 128)), int(config.get("hidden_dim", 1024)))
+    common = (
+        encoder_name,
+        int(config.get("projection_dim", 128)),
+        int(config.get("hidden_dim", 1024)),
+    )
     temperature = float(config.get("temperatures", {}).get(name, config.get("temperature", 0.2)))
     if name == "simclr":
         return SimCLR(*common, temperature)
     if name == "moco":
-        return MoCo(*common, temperature, int(config.get("queue_size", 4096)),
-                    float(config.get("momentum", 0.99)))
+        return MoCo(
+            *common,
+            temperature,
+            int(config.get("queue_size", 4096)),
+            float(config.get("momentum", 0.99)),
+        )
     if name == "byol":
         return BYOL(*common, float(config.get("momentum", 0.99)))
     if name == "nnclr":
         return NNCLR(*common, temperature, int(config.get("queue_size", 8192)))
-    return SwAV(*common, temperature, int(config.get("prototype_count", 300)),
-                float(config.get("sinkhorn_epsilon", 0.05)), int(config.get("prototype_freeze_steps", 100)))
+    return SwAV(
+        *common,
+        temperature,
+        int(config.get("prototype_count", 300)),
+        float(config.get("sinkhorn_epsilon", 0.05)),
+        int(config.get("prototype_freeze_steps", 100)),
+    )
 
 
 def encoder_state_dict(method: SSLMethod) -> dict[str, torch.Tensor]:

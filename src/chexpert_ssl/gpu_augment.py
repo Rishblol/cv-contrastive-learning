@@ -36,8 +36,9 @@ def augment_grayscale_batch(
     )
     crop_w = torch.sqrt(area * aspect).clamp(max=1.0)
     crop_h = torch.sqrt(area / aspect).clamp(max=1.0)
-    angle = _uniform(batch, (-float(config.get("rotation", 10.0)),
-                             float(config.get("rotation", 10.0))), device) * (math.pi / 180.0)
+    angle = _uniform(
+        batch, (-float(config.get("rotation", 10.0)), float(config.get("rotation", 10.0))), device
+    ) * (math.pi / 180.0)
     translation = float(config.get("translation", 0.05))
     offset_x = (torch.rand(batch, device=device) * 2 - 1) * (1 - crop_w)
     offset_x += (torch.rand(batch, device=device) * 2 - 1) * translation * 2
@@ -93,4 +94,6 @@ def augment_grayscale_batch(
         x = (x + torch.randn_like(x) * std).clamp_(0, 1)
 
     x = x.sub(0.5).div(0.5).expand(-1, 3, -1, -1)
-    return x.contiguous(memory_format=torch.channels_last if channels_last else torch.contiguous_format)
+    return x.contiguous(
+        memory_format=torch.channels_last if channels_last else torch.contiguous_format
+    )

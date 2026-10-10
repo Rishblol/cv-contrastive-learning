@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: chexpert-ssl
 Version: 0.1.0
-Summary: Label-efficient chest X-ray classification with SimCLR
+Summary: Label-efficient chest X-ray classification with five SSL methods
 Requires-Python: <3.14,>=3.10
 License-File: LICENSE
 Requires-Dist: numpy>=1.26

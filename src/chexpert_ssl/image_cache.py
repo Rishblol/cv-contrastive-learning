@@ -16,7 +16,6 @@ from torch.utils.data import Dataset
 
 from chexpert_ssl.data import manifest_hash
 
-
 CACHE_VERSION = 1
 
 
@@ -30,6 +29,10 @@ class CachedGrayscaleDataset(Dataset):
 
     def __len__(self) -> int:
         return self.image_count
+
+    def __getstate__(self) -> dict:
+        # Spawned workers reopen the mmap instead of serializing the entire cache.
+        return {**self.__dict__, "_images": None}
 
     def __getitem__(self, index: int) -> np.ndarray:
         if self._images is None:
@@ -73,7 +76,11 @@ def ensure_grayscale_cache(
         try:
             metadata: dict[str, Any] = json.loads(metadata_path.read_text(encoding="utf-8"))
             cached = np.load(cache_path, mmap_mode="r")
-            if metadata == signature and cached.shape == (len(frame), resolution, resolution) and cached.dtype == np.uint8:
+            if (
+                metadata == signature
+                and cached.shape == (len(frame), resolution, resolution)
+                and cached.dtype == np.uint8
+            ):
                 print(f"Reusing grayscale image cache: {cache_path}", flush=True)
                 return CachedGrayscaleDataset(cache_path, len(frame)), False
         except (OSError, ValueError, json.JSONDecodeError):

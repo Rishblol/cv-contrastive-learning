@@ -1,0 +1,7 @@
+dataset_root: CheXpert-v1.0-small
+output_dir: data/processed/manifests
+dev_fraction: 0.1
+seed: 42
+frontal_only_downstream: true
+budgets: [0.01, 0.05, 0.10, 0.25, 1.0]
+budget_seeds: [42, 43, 44]

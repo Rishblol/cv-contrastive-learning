@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.metrics import average_precision_score, balanced_accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    roc_auc_score,
+)
 
 from .data import TARGETS
 
