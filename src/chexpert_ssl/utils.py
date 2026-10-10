@@ -116,6 +116,9 @@ def normalize_config(config: dict) -> dict:
         "momentum",
         "sinkhorn_epsilon",
         "dev_fraction",
+        "mean",
+        "std",
+        "pos_weight_max",
     }
     integer_keys = {
         "seed",
@@ -134,6 +137,10 @@ def normalize_config(config: dict) -> dict:
         "queue_size",
         "prototype_count",
         "prototype_freeze_steps",
+        "prototype_freeze_epochs",
+        "warmup_epochs",
+        "bn_splits",
+        "max_steps_per_epoch",
     }
     resolved = {}
     for key, value in config.items():
@@ -252,6 +259,13 @@ def validate_training_config(config: dict, stage: str) -> None:
             raise ValueError("Pretraining requires a supported SSL method and cosine schedule")
         if int(config["batch_size"]) < 2:
             raise ValueError("SSL batch size must be at least two")
+        if int(config.get("warmup_epochs", 0)) < 0:
+            raise ValueError("Warmup epochs must be nonnegative")
+        if int(config.get("max_steps_per_epoch", 1)) < 1:
+            raise ValueError("max_steps_per_epoch must be positive")
+        splits = int(config["ssl"].get("bn_splits", 1))
+        if splits < 1 or (config["method"] == "moco" and int(config["batch_size"]) % splits):
+            raise ValueError("MoCo batch size must be divisible by positive BatchNorm splits")
     else:
         if config["mode"] not in {
             "supervised",
@@ -268,6 +282,8 @@ def validate_training_config(config: dict, stage: str) -> None:
             raise ValueError("Invalid label fraction or early-stopping patience")
         if not config["sampled_patients"]:
             raise ValueError("A persisted sampled_patients cohort is required")
+        if config.get("pos_weight_max") is not None and float(config["pos_weight_max"]) < 1:
+            raise ValueError("pos_weight_max must be at least one")
         if config["mode"] != "supervised":
             if config.get("ssl_method") not in METHODS or not config.get("ssl_checkpoint"):
                 raise ValueError("SSL transfer requires ssl_method and ssl_checkpoint")

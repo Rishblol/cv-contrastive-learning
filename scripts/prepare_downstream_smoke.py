@@ -40,6 +40,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     train.to_csv(args.output_dir / "downstream_train.csv", index=False)
     dev.to_csv(args.output_dir / "development.csv", index=False)
+    import pandas as pd
+
+    pd.concat([train, dev], ignore_index=True).to_csv(
+        args.output_dir / "all_training.csv", index=False
+    )
     save_json(
         args.output_dir / "cohort.json",
         {"seed": config["seed"], "label_fraction": 1.0, "patient_ids": patients},

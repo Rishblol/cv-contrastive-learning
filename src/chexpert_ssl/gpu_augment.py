@@ -93,7 +93,9 @@ def augment_grayscale_batch(
         std = torch.rand(batch, device=device).view(batch, 1, 1, 1) * noise_std * mask
         x = (x + torch.randn_like(x) * std).clamp_(0, 1)
 
-    x = x.sub(0.5).div(0.5).expand(-1, 3, -1, -1)
+    normalization = config.get("normalization", {"mean": 0.5, "std": 0.5})
+    x = x.sub(float(normalization["mean"])).div(float(normalization["std"]))
+    x = x.expand(-1, 3, -1, -1)
     return x.contiguous(
         memory_format=torch.channels_last if channels_last else torch.contiguous_format
     )

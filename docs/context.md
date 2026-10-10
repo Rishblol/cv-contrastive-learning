@@ -97,8 +97,14 @@ must be identical across methods in a comparison.
 - Pretrain only on images from the training partition; do not use downstream labels.
 - Use the method-specific projection/prediction heads and objective for SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. Downstream transfer uses the online encoder only.
 - Share the data partition, GPU-side two-view augmentation policy, optimizer family, batch size, and encoder architecture across methods. Method-specific temperatures, queues, momentum, and prototypes are configuration values.
-- Decode and resize images once into a reusable memory-mapped grayscale uint8 cache, then perform batched augmentations on the training device. The 128 x 128 cache is about 3.1 GiB for the current manifest.
-- Use mixed precision, channels-last layout, TF32, fused AdamW, and a cosine learning-rate schedule when CUDA is available. Defaults are batch size 64, 128-pixel input, and 30 epochs; if memory is insufficient, lower batch size identically for all five methods.
+- Decode and resize images once into a reusable memory-mapped grayscale uint8
+  cache, then perform batched augmentations on the training device. The full
+  training-image cache at 128 x 128 is about 3.4 GiB.
+- The primary runner now follows `chexpert_ssl_colab.ipynb`: batch size 256,
+  128-pixel input, 30 epochs, AdamW, two warmup epochs, and per-step cosine decay.
+  Base LR is 0.001 times batch size / 256; the cosine minimum multiplier is
+  0.001. CUDA performance settings remain available. Lower batch size identically
+  across all methods if needed, recording this as a reference-protocol deviation.
 - Save resumable per-epoch checkpoints and the exact configuration.
 
 ### X-ray-safe augmentation policy
@@ -110,7 +116,10 @@ All five SSL methods use two independently augmented views of each image. X-ray 
 - Avoid aggressive crops, large rotations, posterization, or cutout transforms that can remove pathology-bearing regions.
 - Treat horizontal flipping as a configurable ablation. The default primary protocol should disable it because laterality can be clinically informative.
 
-The training script creates `data/processed/cache/pretrain_gray_128.npy` on its first run using bounded decode batches and reuses it for subsequent methods. It saves example pairs of GPU-augmented views before full runs; inspect them for anatomical plausibility.
+The reference profile creates
+`data/processed/notebook-reference/cache/all_training_gray_128.npy` using bounded
+decode batches and reuses it across methods and downstream runs. It saves example
+pairs of GPU-augmented views before full runs; inspect them for anatomical plausibility.
 
 The implementations use two global views for all five methods. SwAV does not use multi-crop in this study. The MoCo implementation uses a momentum encoder and queue in the single-device workflow; results should be reported with this implementation detail rather than described as a distributed multi-GPU run.
 
@@ -192,8 +201,8 @@ These are starting points, not results to tune against the official validation s
 | SSL encoder | ResNet-18 default; ResNet-50 optional |
 | SSL epochs | 30 initial compute-conscious default |
 | SSL temperature | 0.1 to 0.2, selected on development protocol |
-| SSL batch size | 64 default; decrease consistently across methods if GPU memory is insufficient |
-| Downstream epochs | Up to 50 with development-set early stopping |
+| SSL batch size | 256 reference default; decrease consistently if needed |
+| Downstream epochs | Fine-tuning: 30/30/25/20/10 by budget; probe: up to 100 |
 | Fine-tuning optimizer | AdamW with discriminative or lower encoder learning rate |
 | Linear-probe optimizer | AdamW |
 | Precision | Automatic mixed precision |
@@ -527,3 +536,79 @@ separate work. Pretraining peak-memory logging is implemented, superseding the
 older deferred-status statement in Section 13. Synthetic CPU tests exercise
 small pretraining and downstream jobs; they do not establish CheXpert performance
 or substitute for the documented GPU smoke and human augmentation review.
+
+## 15. Notebook-reference alignment (2026-10-10)
+
+`chexpert_ssl_colab.ipynb` is the implementation reference. The default matrix
+runner uses `configs/experiments/notebook_reference.yaml`; earlier method YAMLs
+and `label_efficiency.yaml` retain the historical seed-42 protocol. Reference
+artifacts are isolated under `data/processed/notebook-reference/` and
+`outputs/notebook-reference/`, including a separate generated plan. Existing
+cohorts and checkpoints are preserved and are not compatible resume points for
+the changed protocol. Sections 13 and 14 describe historical implementations;
+the settings below supersede their default-training and deferred-reporting notes.
+
+Reference scientific choices:
+
+- ResNet-18 at 128 pixels; identical encoder settings across five methods.
+  Projection/prediction hidden width 1024 and projection dimension 128.
+- Patient split uses NumPy `RandomState` seed 1234 and 10% development patients.
+  Downstream seeds are 0, 1, 2; cohorts use a saved permutation and ceiling-rounded
+  patient counts. Budget cohorts remain nested and shared across methods.
+- Grayscale uint8 images are cached with PIL bilinear resizing. The full training
+  cache includes development pixels, but SSL indexes only training patients and
+  never learns from development images or labels. Downstream uses this same
+  cache. Network inputs use grayscale mean 0.449 and standard deviation 0.226.
+- SSL batch size 256, 30 epochs, AdamW with weight decay 0.0001. LR is 0.001
+  scaled by batch size / 256, two warmup epochs, and per-step cosine decay to a
+  0.001 multiplier. Epoch batch orders follow the notebook's sampling rules.
+- MoCo uses four-way split BatchNorm. NNCLR's detached nearest-neighbor positives
+  are the InfoNCE anchors, matching the notebook's loss direction. SwAV freezes
+  prototypes for the first epoch; BYOL updates its momentum at step-level progress.
+  Feature-spread monitoring is saved each epoch. Downstream transfer uses the
+  final online encoder from `last.pt`, matching the notebook's `encoder.pt`.
+- Linear probes standardize features with training-only mean and sample standard
+  deviation, floored at 1e-6. Batch size 512, head LR 0.001, up to 100 epochs,
+  patience 10. Statistics are saved in the head rather than folded into weights;
+  this gives the same mathematical prediction and supports strict resume checks.
+- Other downstream arms use batch size 64, patience 7, head LR 0.001, and
+  cosine decay. Encoder LR is 0.001 for scratch and 0.0001 for pretrained models.
+  Epoch limits for 1/5/10/25/100% budgets are 30/30/25/20/10.
+- Downstream GPU augmentation uses crop scale 0.8–1.0, ratio 0.9–1.1,
+  rotation 5 degrees, translation 0.03, brightness/contrast 0.1, and no blur,
+  noise, or horizontal flip. Positive-only BCE weights are clipped to [1, 50].
+  Development thresholds use the notebook's Youden rule and tie ordering.
+- Final evaluation saves patient-bootstrap macro and per-label AUROC intervals.
+  Raw-metric aggregation writes mean/std/count tables and a label-efficiency plot.
+  Within each ascending budget and seed, execution follows the notebook: scratch,
+  ImageNet, all five probes, then all five fine-tuning runs.
+
+Intentional operational differences from the notebook:
+
+- Bounded smoke uses separate manifests: all five methods run two epochs of at
+  most four steps at batch size 64; downstream checks scratch, SimCLR probing,
+  MoCo fine-tuning, and ImageNet from a bounded saved 5% patient cohort.
+  Tests directly compare notebook model losses/gradients, augmentation, LR,
+  cohort membership, and threshold selection, and exercise reference-profile
+  CPU transfer/evaluation and interruption/resume. They do not establish GPU
+  throughput, bitwise CUDA equivalence, or clinical performance.
+- The repository retains atomic full-precision best/last checkpoints, RNG state,
+  input/implementation hashes, OS locks, and development-selection locks. It
+  does not delete resume checkpoints after completion, silently overwrite smoke
+  outputs, or accept a completed run merely because a metric file exists.
+- Nonfinite training losses fail immediately; SwAV assignments use equivalent
+  log-space Sinkhorn normalization for numerical stability. CUDA throughput
+  optimizations and separate worker RNG streams can change numerical trajectories.
+- Official-validation records may be prepared and checked for disjointness, but
+  model selection and calibration never use them. The notebook actually reads
+  and prints their prevalence before its final flag; this is not copied as a
+  selection workflow. Final model evaluation requires explicit saved selection
+  locks rather than a mutable notebook confirmation variable.
+- Teacher/student pseudo-labeling and CheXzero are future extensions in the
+  notebook, not prerequisites for its image-only study. Existing VLM scaffolding
+  remains optional and requires its own provenance and license review.
+
+Paired-difference confidence intervals, retrieval, attribution, and broader
+augmentation ablations remain separate work. They are not implemented by the
+reference notebook either. The updated protocol requires new preparation,
+matching smoke checks and augmentation review before full reference training.

@@ -14,6 +14,46 @@ from chexpert_ssl.models import build_encoder
 METHODS = ("simclr", "moco", "byol", "nnclr", "swav")
 
 
+class SplitBatchNorm(nn.BatchNorm2d):
+    """Notebook's single-device MoCo normalization over independent subgroups."""
+
+    def __init__(self, num_features: int, num_splits: int = 4, **kwargs):
+        super().__init__(num_features, **kwargs)
+        if num_splits < 1:
+            raise ValueError("BatchNorm splits must be positive")
+        self.num_splits = num_splits
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        n, c, h, w = inputs.shape
+        if self.training and n % self.num_splits == 0:
+            mean = self.running_mean.repeat(self.num_splits)
+            var = self.running_var.repeat(self.num_splits)
+            output = F.batch_norm(
+                inputs.reshape(-1, c * self.num_splits, h, w),
+                mean,
+                var,
+                self.weight.repeat(self.num_splits),
+                self.bias.repeat(self.num_splits),
+                True,
+                self.momentum,
+                self.eps,
+            ).reshape(n, c, h, w)
+            with torch.no_grad():
+                self.running_mean.copy_(mean.reshape(self.num_splits, c).mean(0))
+                self.running_var.copy_(var.reshape(self.num_splits, c).mean(0))
+            return output
+        return F.batch_norm(
+            inputs,
+            self.running_mean,
+            self.running_var,
+            self.weight,
+            self.bias,
+            False,
+            self.momentum,
+            self.eps,
+        )
+
+
 def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim, bias=False),
@@ -76,9 +116,13 @@ class MoCo(SSLMethod):
         temperature: float,
         queue_size: int,
         momentum: float,
+        bn_splits: int = 1,
     ):
         super().__init__()
-        self.encoder, feature_dim = build_encoder(encoder_name)
+        self.encoder, feature_dim = build_encoder(
+            encoder_name,
+            norm_layer=(lambda c: SplitBatchNorm(c, bn_splits)) if bn_splits > 1 else None,
+        )
         self.projector = _mlp(feature_dim, hidden_dim, projection_dim)
         self.key_encoder = copy.deepcopy(self.encoder)
         self.key_projector = copy.deepcopy(self.projector)
@@ -159,6 +203,7 @@ class NNCLR(SSLMethod):
         hidden_dim: int,
         temperature: float,
         queue_size: int,
+        positive_as_anchor: bool = False,
     ):
         super().__init__()
         self.encoder, feature_dim = build_encoder(encoder_name)
@@ -173,6 +218,7 @@ class NNCLR(SSLMethod):
         )
         self.predictor = _mlp(projection_dim, hidden_dim, projection_dim)
         self.temperature, self.queue_size = temperature, queue_size
+        self.positive_as_anchor = positive_as_anchor
         self.register_buffer("support", F.normalize(torch.randn(queue_size, projection_dim), dim=1))
         self.register_buffer("support_filled", torch.zeros(1, dtype=torch.long))
         self.register_buffer("support_pointer", torch.zeros(1, dtype=torch.long))
@@ -195,9 +241,19 @@ class NNCLR(SSLMethod):
         h1, h2 = self.projector(self.encoder(first)), self.projector(self.encoder(second))
         z1, z2 = _normalize(h1.detach()), _normalize(h2.detach())
         p1, p2 = _normalize(self.predictor(h1)), _normalize(self.predictor(h2))
-        loss = 0.5 * (
-            _info_nce(p2, self._nearest(z1), self.temperature)
-            + _info_nce(p1, self._nearest(z2), self.temperature)
+        positive1, positive2 = self._nearest(z1), self._nearest(z2)
+        loss = (
+            0.5
+            * (
+                _info_nce(positive1, p2, self.temperature)
+                + _info_nce(positive2, p1, self.temperature)
+            )
+            if self.positive_as_anchor
+            else 0.5
+            * (
+                _info_nce(p2, positive1, self.temperature)
+                + _info_nce(p1, positive2, self.temperature)
+            )
         )
         self._enqueue(torch.cat((z1, z2)))
         return loss
@@ -288,11 +344,17 @@ def build_ssl_method(name: str, encoder_name: str, config: dict) -> SSLMethod:
             temperature,
             int(config.get("queue_size", 4096)),
             float(config.get("momentum", 0.99)),
+            int(config.get("bn_splits", 1)),
         )
     if name == "byol":
         return BYOL(*common, float(config.get("momentum", 0.99)))
     if name == "nnclr":
-        return NNCLR(*common, temperature, int(config.get("queue_size", 8192)))
+        return NNCLR(
+            *common,
+            temperature,
+            int(config.get("queue_size", 8192)),
+            bool(config.get("positive_as_anchor", False)),
+        )
     return SwAV(
         *common,
         temperature,

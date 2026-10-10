@@ -1,0 +1,80 @@
+# Scientific defaults from chexpert_ssl_colab.ipynb; legacy artifacts are separate.
+extends: label_efficiency.yaml
+name: chexpert-notebook-reference
+execution_order: notebook
+data_config: configs/data/notebook_reference.yaml
+generated_dir: outputs/plans/notebook-reference
+seeds: [0, 1, 2]
+splits_dir: data/processed/notebook-reference/splits
+pretrain_output_root: outputs/notebook-reference/pretrain
+downstream_output_root: outputs/notebook-reference/downstream
+evaluation_output_root: outputs/notebook-reference/evaluation
+final_manifest: data/processed/notebook-reference/manifests/final_validation.csv
+transfer_checkpoint: last.pt
+per_label_bootstrap: true
+notebook_smoke: true
+smoke_budget: 0.05
+pretrain_overrides:
+  seed: 0
+  manifest: data/processed/notebook-reference/manifests/pretrain_train_leakage_free.csv
+  development_manifest: data/processed/notebook-reference/manifests/development.csv
+  cache_path: data/processed/notebook-reference/cache/all_training_gray_128.npy
+  cache_source_manifest: data/processed/notebook-reference/manifests/all_training.csv
+  batch_size: 256
+  learning_rate: 0.001
+  notebook_schedule: true
+  notebook_sampling: true
+  warmup_epochs: 2
+  monitor_feature_spread: true
+  augmentation:
+    normalization: {mean: 0.449, std: 0.226}
+  ssl:
+    hidden_dim: 1024
+    projection_dim: 128
+method_overrides:
+  moco:
+    ssl: {bn_splits: 4}
+  nnclr:
+    ssl: {positive_as_anchor: true}
+  swav:
+    ssl: {prototype_freeze_epochs: 1}
+downstream_overrides:
+  seed: 0
+  train_manifest: data/processed/notebook-reference/manifests/downstream_train.csv
+  development_manifest: data/processed/notebook-reference/manifests/development.csv
+  sampled_patients: data/processed/notebook-reference/splits/budget_0p01_seed_0.json
+  batch_size: 64
+  epochs: 30
+  early_stopping_patience: 7
+  learning_rate: 0.001
+  encoder_learning_rate: 0.0001
+  pos_weight_max: 50.0
+  schedule: cosine
+  threshold_method: youden
+  cached_downstream: true
+  notebook_sampling: true
+  training_cache_manifest: data/processed/notebook-reference/manifests/all_training.csv
+  downstream_cache_path: data/processed/notebook-reference/cache/all_training_gray_128.npy
+  normalization: {mean: 0.449, std: 0.226}
+  supervised_augmentation:
+    notebook_preprocessing: true
+    normalization: {mean: 0.449, std: 0.226}
+    scale: [0.8, 1.0]
+    ratio: [0.9, 1.1]
+    rotation: 5.0
+    translation: 0.03
+    brightness: 0.1
+    contrast: 0.1
+    blur_probability: 0.0
+    noise_probability: 0.0
+    noise_std: 0.0
+    horizontal_flip: false
+protocol_overrides:
+  ssl_linear:
+    epochs: 100
+    early_stopping_patience: 10
+    batch_size: 512
+    standardize_features: true
+  scratch:
+    encoder_learning_rate: 0.001
+epochs_by_budget: {0.01: 30, 0.05: 30, 0.10: 25, 0.25: 20, 1.0: 10}

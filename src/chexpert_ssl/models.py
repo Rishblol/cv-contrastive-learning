@@ -8,7 +8,10 @@ from torchvision import models as vision_models
 
 
 def build_encoder(
-    name: str = "resnet18", pretrained: bool = False, weights_name: str | None = None
+    name: str = "resnet18",
+    pretrained: bool = False,
+    weights_name: str | None = None,
+    norm_layer=None,
 ) -> tuple[nn.Module, int]:
     """Return a supported torchvision backbone that emits one feature vector per image."""
     constructors = {
@@ -26,7 +29,7 @@ def build_encoder(
     weights = None
     if pretrained:
         weights = weight_enum[weights_name] if weights_name else weight_enum.DEFAULT
-    model = constructor(weights=weights)
+    model = constructor(weights=weights, **({"norm_layer": norm_layer} if norm_layer else {}))
     if name.startswith("resnet"):
         features = model.fc.in_features
         model.fc = nn.Identity()
@@ -58,6 +61,19 @@ class SimCLRModel(nn.Module):
         return self.projector(self.encoder(images))
 
 
+class StandardizedHead(nn.Module):
+    """Train-only feature statistics saved with the head for identical evaluation."""
+
+    def __init__(self, feature_dim: int, num_labels: int):
+        super().__init__()
+        self.register_buffer("mean", torch.zeros(feature_dim))
+        self.register_buffer("std", torch.ones(feature_dim))
+        self.linear = nn.Linear(feature_dim, num_labels)
+
+    def forward(self, features):
+        return self.linear((features - self.mean) / self.std)
+
+
 class MultiLabelClassifier(nn.Module):
     def __init__(
         self,
@@ -66,12 +82,17 @@ class MultiLabelClassifier(nn.Module):
         freeze_encoder: bool = False,
         pretrained: bool = False,
         weights_name: str | None = None,
+        standardize_features: bool = False,
     ) -> None:
         super().__init__()
         self.encoder, feature_dim = build_encoder(
             encoder_name, pretrained=pretrained, weights_name=weights_name
         )
-        self.classifier = nn.Linear(feature_dim, num_labels)
+        self.classifier = (
+            StandardizedHead(feature_dim, num_labels)
+            if standardize_features
+            else nn.Linear(feature_dim, num_labels)
+        )
         if freeze_encoder:
             self.freeze_encoder()
 

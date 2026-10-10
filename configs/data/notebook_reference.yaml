@@ -1,0 +1,6 @@
+extends: prepare.yaml
+output_dir: data/processed/notebook-reference/manifests
+seed: 1234
+budget_seeds: [0, 1, 2]
+random_state: true
+budget_rounding: ceil

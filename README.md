@@ -5,6 +5,7 @@ ResNet encoder, training image pool, augmentation policy, and patient cohorts.
 Each SSL encoder supports frozen linear probing and full fine-tuning. Scratch
 and explicitly versioned ImageNet initialization provide reference baselines.
 The scientific protocol is [docs/context.md](docs/context.md).
+The implementation reference is [chexpert_ssl_colab.ipynb](chexpert_ssl_colab.ipynb).
 
 ## Setup
 
@@ -29,16 +30,23 @@ defines matched downstream settings. YAML `extends` paths are relative to the
 containing YAML; dataset and output paths are relative to the repository root.
 Resolved configurations are saved beside every run.
 
-`configs/experiments/label_efficiency.yaml` declares five pretraining runs and
+The runner defaults to `configs/experiments/notebook_reference.yaml`, which
+overrides the shared templates to match the notebook. It declares five pretraining runs and
 180 downstream runs: ten SSL transfer arms, scratch, and ImageNet, across five
-patient budgets and three seeds. Pretraining seed 42 is reused across downstream
+patient budgets and three seeds. Pretraining seed 0 is reused across downstream
 budgets/seeds; downstream variability does not measure pretraining-seed variance.
 The planner validates settings across all arms and writes resolved configurations
-and commands under `outputs/plans/label-efficiency/`. Planning starts no training:
+and commands under `outputs/plans/notebook-reference/`. Planning starts no training:
 
 ```bash
 python scripts/run_experiments.py --stage plan
 ```
+
+The earlier seed-42 profile remains available with
+`--config configs/experiments/label_efficiency.yaml`; direct method YAMLs also
+retain those earlier defaults. Use the matrix runner for notebook-reference runs.
+Reference data lives under `data/processed/notebook-reference/` and results under
+`outputs/notebook-reference/`. Existing cohorts and checkpoints are not rewritten.
 
 Generated plans are immutable: changing an existing plan requires a new
 `generated_dir`. Use new output directories when changing experimental settings.
@@ -58,7 +66,8 @@ used by the study.
 
 ### 1. Prepare data once
 
-Set the dataset location in `configs/data/prepare.yaml`, then run:
+Set the dataset location in `configs/data/prepare.yaml` (inherited by
+`configs/data/notebook_reference.yaml`), then run:
 
 ```bash
 python scripts/run_experiments.py --stage prepare
@@ -71,6 +80,9 @@ including patients with only lateral images. It writes the canonical
 downstream/development/final manifests, quality reports, partition IDs, and
 nested patient-budget JSON files. Patient identifiers retain leading zeros.
 Existing prepared data is protected against accidental regeneration.
+The reference profile uses NumPy `RandomState`, split seed 1234, downstream
+seeds 0/1/2, and ceiling-rounded patient counts, matching the notebook. It
+requires its own preparation even if the older seed-42 study already exists.
 Legacy manifests whose patient IDs lost leading zeros are normalized in memory
 using their source paths, only when numeric identities agree. Legacy cohort IDs
 are matched by the same identity without rewriting or resampling the saved cohort.
@@ -94,11 +106,13 @@ Official validation records are never used for training or development selection
 python scripts/run_experiments.py --stage smoke
 ```
 
-This runs the test suite, creates a bounded SSL manifest, trains a one-epoch
-SimCLR smoke, and creates a bounded downstream smoke from the persisted 1%
-cohort. The downstream smoke uses separate manifests/cohort/output paths.
+This runs the test suite, creates a bounded SSL manifest, and trains all five
+objectives for two epochs with at most four steps per epoch at batch size 64.
+It checks scratch, SimCLR probe, MoCo fine-tuning, and ImageNet downstream paths
+on a bounded patient cohort. ImageNet requires access to its pinned weights.
+The downstream smoke uses separate manifests/cohort/output paths.
 Inspect the augmentation preview path printed by the command, under
-`outputs/smoke/runs/<version>/pretrain/augmentation_pairs.png`, for anatomical
+`outputs/notebook-reference/smoke/<version>/pretrain-simclr/augmentation_pairs.png`, for anatomical
 plausibility. The runner versions smoke outputs by settings, source inputs, and
 implementation, preserving older checkpoints. Generated smoke configs resume
 compatible interrupted runs; changed inputs or code select a fresh directory.
@@ -113,27 +127,34 @@ python scripts/run_experiments.py --stage pretrain --augmentation-reviewed
 ```
 
 The runner requires completed pretraining and downstream smoke artifacts and
-records the reviewed preview hash. Defaults are 30 epochs, batch size 64,
-128-pixel images, AdamW, and a cosine schedule. A shared grayscale memory-mapped
-cache reduces repeated decoding. CUDA runs support automatic mixed precision,
+records the reviewed preview hash. Reference defaults are 30 epochs, batch size
+256, 128-pixel images, AdamW, two warmup epochs, and per-step cosine decay with
+a 0.001 minimum LR multiplier. Base LR is `0.001 * batch_size / 256`.
+Normalization uses grayscale mean 0.449 and standard deviation 0.226. One
+training-image cache is shared across pretraining and downstream; cached
+development images are used only for downstream evaluation.
+CUDA runs support automatic mixed precision,
 channels-last layout, TF32, and fused AdamW. If memory is insufficient, lower
-batch size in the shared pretraining defaults for all five methods and use new
-run/plan directories. Individual entry points remain available, for example:
+batch size in the reference matrix's `pretrain_overrides` for all five methods and use new
+run/plan directories. Individual entry points accept generated reference configs, for example:
 
 ```bash
-python scripts/train_pretrain.py --config configs/pretrain/moco.yaml
+python scripts/train_pretrain.py --config outputs/plans/notebook-reference/pretrain/moco-resnet18-seed0.json
 ```
 
 Pretraining `best.pt` minimizes the SSL training loss; `last.pt` is resumable.
-Neither is selected using official validation. MoCo is single-device with a
-momentum encoder/queue; SwAV uses two global views without multi-crop.
+Neither is selected using official validation. The reference profile transfers
+the final encoder from `last.pt`, matching the notebook's final `encoder.pt`.
+MoCo uses four-way split BatchNorm and a momentum encoder/queue; SwAV uses two
+global views without multi-crop and freezes prototypes for the first epoch.
+Epoch logs include feature spread to help detect representation collapse.
 
 ### 4. Run matched downstream experiments
 
 Start with one budget and seed:
 
 ```bash
-python scripts/run_experiments.py --stage downstream --methods simclr scratch imagenet --budgets 0.01 --seeds 42
+python scripts/run_experiments.py --stage downstream --methods simclr scratch imagenet --budgets 0.01 --seeds 0
 ```
 
 Then execute the complete downstream matrix:
@@ -143,10 +164,13 @@ python scripts/run_experiments.py --stage downstream
 ```
 
 Every method at a seed/budget pair consumes the same persisted JSON cohort.
-Linear probes extract frozen features once per run. Fine-tuning supports a
-separate encoder learning rate. All runs use subset-specific positive weights,
+Linear probes standardize frozen features using training-only statistics and
+fit at batch size 512 for up to 100 epochs with patience 10. Other arms use batch
+size 64, patience 7, and budget-specific epoch caps 30/30/25/20/10. Head LR is
+0.001; pretrained encoder LR is 0.0001 and scratch encoder LR is 0.001, with
+cosine decay for fine-tuning. All runs use subset-specific positive weights clipped to [1, 50],
 development macro AUROC for checkpoint selection, and development-selected
-thresholds. `best.pt` embeds those thresholds.
+Youden thresholds. `best.pt` embeds those thresholds and any feature statistics.
 
 Checkpoint writes are atomic; concurrent writers to one run are rejected.
 Resume verifies the resolved configuration, implementation and input hashes and restores RNG
@@ -164,14 +188,14 @@ anomalous experiment.
 Development summaries can be generated separately:
 
 ```bash
-python scripts/aggregate_results.py --partition development
+python scripts/run_experiments.py --stage aggregate --partition development
 ```
 
 After completing development-only configuration selection, lock each selected
 run with a reason describing that decision:
 
 ```bash
-python scripts/lock_selection.py --run-dir outputs/downstream/simclr-ssl_finetune-resnet18-budget0p01-seed42 --reason "Configuration selected from development results"
+python scripts/lock_selection.py --run-dir outputs/notebook-reference/downstream/simclr-ssl_finetune-resnet18-budget0p01-seed0 --reason "Configuration selected from development results"
 ```
 
 Locks bind the training signature, checkpoint, thresholds, and development
@@ -191,13 +215,14 @@ architecture, input resolution, and preprocessing from the checkpoint and
 rejects conflicting overrides. Existing final results are reused by the runner;
 the evaluation entry point rejects accidental repeat evaluation.
 
-Final artifacts live under `outputs/evaluation/`; summaries live under
-`outputs/reports/final_validation/`. Development summaries are separate.
+Final artifacts live under `outputs/notebook-reference/evaluation/`; summaries live under
+`outputs/notebook-reference/reports/final_validation/`. Development summaries are separate.
 Aggregation never mixes development and held-out scores and rejects duplicate
 seed/method/budget results. It includes per-label and threshold metrics in
 addition to macro metrics. Evaluation exports predictions, AP/PA and available
-age/sex metadata, plus a patient-bootstrap macro-AUROC confidence interval.
-Paired-difference bootstrap, report plots, retrieval, and attribution remain
+age/sex metadata, plus patient-bootstrap macro and per-pathology AUROC intervals.
+Aggregation writes a mean/std/count table and label-efficiency plot, excluding
+smoke and archived artifacts. Paired-difference bootstrap, retrieval, and attribution remain
 future reporting work.
 
 ## Optional VLM extension

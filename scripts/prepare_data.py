@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frontal-only-downstream", action="store_true")
     parser.add_argument("--budgets", type=float, nargs="+", default=[0.01, 0.05, 0.1, 0.25, 1.0])
     parser.add_argument("--budget-seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--random-state", action="store_true")
+    parser.add_argument("--budget-rounding", choices=("round", "ceil"), default="round")
     parser.add_argument(
         "--overwrite", action="store_true", help="Explicitly regenerate all manifests and cohorts"
     )
@@ -56,13 +58,21 @@ def main() -> None:
     valid = prepare_manifest(root / "valid.csv", root, frontal_only=args.frontal_only_downstream)
     train, missing_train = existing_images(train)
     valid, missing_valid = existing_images(valid)
-    pretrain_train, development_source = split_by_patient(train, args.dev_fraction, args.seed)
+    if args.frontal_only_downstream:
+        valid = valid.loc[valid["AP/PA"].isin(["AP", "PA"])].copy()
+    pretrain_train, development_source = split_by_patient(
+        train, args.dev_fraction, args.seed, args.random_state
+    )
     downstream_train, dev = pretrain_train, development_source
     if args.frontal_only_downstream:
         downstream_train = pretrain_train.loc[
             pretrain_train["Frontal/Lateral"].eq("Frontal")
+            & pretrain_train["AP/PA"].isin(["AP", "PA"])
         ].copy()
-        dev = development_source.loc[development_source["Frontal/Lateral"].eq("Frontal")].copy()
+        dev = development_source.loc[
+            development_source["Frontal/Lateral"].eq("Frontal")
+            & development_source["AP/PA"].isin(["AP", "PA"])
+        ].copy()
     if downstream_train.empty or dev.empty:
         raise ValueError("View filtering produced an empty train/development partition")
     assert_patient_disjoint(downstream_train, dev, valid)
@@ -72,6 +82,7 @@ def main() -> None:
     splits_dir = args.output_dir.parent / "splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
     pretrain_train.to_csv(args.output_dir / "pretrain_train.csv", index=False)
+    train.to_csv(args.output_dir / "all_training.csv", index=False)
     pretrain_train.to_csv(args.output_dir / "pretrain_train_leakage_free.csv", index=False)
     downstream_train.to_csv(args.output_dir / "downstream_train.csv", index=False)
     dev.to_csv(args.output_dir / "development.csv", index=False)
@@ -89,12 +100,17 @@ def main() -> None:
     )
     for budget_seed in args.budget_seeds:
         for fraction, patients in nested_patient_ids(
-            downstream_train, args.budgets, budget_seed
+            downstream_train, args.budgets, budget_seed, args.random_state, args.budget_rounding
         ).items():
             label = f"{fraction:g}".replace(".", "p")
             save_json(
                 splits_dir / f"budget_{label}_seed_{budget_seed}.json",
-                {"seed": budget_seed, "label_fraction": fraction, "patient_ids": patients},
+                {
+                    "seed": budget_seed,
+                    "label_fraction": fraction,
+                    "patient_ids": patients,
+                    "budget_rounding": args.budget_rounding,
+                },
             )
     save_json(
         args.output_dir / "data_report.json",
@@ -108,6 +124,8 @@ def main() -> None:
             "missing_validation_images": len(missing_valid),
             "dev_fraction": args.dev_fraction,
             "seed": args.seed,
+            "random_state": args.random_state,
+            "budget_rounding": args.budget_rounding,
             "frontal_only_downstream": args.frontal_only_downstream,
             "downstream_filtered_records": len(train) - len(downstream_train) - len(dev),
             "manifest_hashes": {

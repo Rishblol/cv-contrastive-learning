@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, RandomSampler, TensorDataset
 
 from chexpert_ssl.data import (
     TARGETS,
+    CachedTargetDataset,
     CheXpertDataset,
     assert_patient_disjoint,
     read_manifest,
@@ -24,8 +25,10 @@ from chexpert_ssl.data import (
     supervised_transform,
     target_columns,
 )
+from chexpert_ssl.gpu_augment import augment_grayscale_batch
 from chexpert_ssl.metrics import multilabel_metrics, select_thresholds
 from chexpert_ssl.models import MultiLabelClassifier
+from chexpert_ssl.sampling import NotebookBatchSampler
 from chexpert_ssl.utils import (
     atomic_torch_save,
     capture_rng_state,
@@ -43,23 +46,34 @@ from chexpert_ssl.utils import (
 )
 
 
-def positive_weights(frame: pd.DataFrame) -> torch.Tensor:
+def positive_weights(frame: pd.DataFrame, maximum: float | None = None) -> torch.Tensor:
     targets = frame[target_columns()].to_numpy(dtype=np.float32)
     positives = targets.sum(axis=0)
-    return torch.tensor(
-        (len(targets) - positives) / np.clip(positives, 1, None), dtype=torch.float32
-    )
+    weights = (len(targets) - positives) / np.clip(positives, 1, None)
+    if maximum is not None:
+        weights = np.clip(weights, 1.0, maximum)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+def prepare_cached_inputs(inputs, normalization):
+    inputs = inputs.float().div(255).unsqueeze(1)
+    return ((inputs - normalization["mean"]) / normalization["std"]).expand(-1, 3, -1, -1)
 
 
 @torch.inference_mode()
 def predict(
-    model: nn.Module, loader: DataLoader, device: torch.device
+    model: nn.Module, loader: DataLoader, device: torch.device, normalization=None, amp=False
 ) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     truths, scores = [], []
     for inputs, targets in loader:
         truths.append(targets.numpy())
-        scores.append(torch.sigmoid(model(inputs.to(device))).float().cpu().numpy())
+        inputs = inputs.to(device)
+        if normalization and inputs.dtype == torch.uint8:
+            inputs = prepare_cached_inputs(inputs, normalization)
+        with torch.autocast(device_type=device.type, enabled=amp):
+            logits = model(inputs)
+        scores.append(torch.sigmoid(logits.float()).cpu().numpy())
     return np.concatenate(truths), np.concatenate(scores)
 
 
@@ -71,19 +85,41 @@ def extract_features(
     workers: int,
     device: torch.device,
     multiprocessing_context: str = "spawn",
+    config: dict | None = None,
 ) -> TensorDataset:
+    config = config or {}
+    dataset = (
+        CachedTargetDataset(
+            frame,
+            config["downstream_cache_path"],
+            image_size,
+            config.get("training_cache_manifest"),
+        )
+        if config.get("cached_downstream")
+        else CheXpertDataset(
+            frame, supervised_transform(image_size, False, config.get("supervised_augmentation"))
+        )
+    )
     loader = DataLoader(
-        CheXpertDataset(frame, supervised_transform(image_size, False)),
+        dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=workers,
         multiprocessing_context=multiprocessing_context if workers else None,
+        generator=torch.Generator().manual_seed(0),
     )
     model.encoder.eval()
     features, labels = [], []
     for images, targets in loader:
         with torch.no_grad():
-            features.append(model.encoder(images.to(device)).float().cpu())
+            images = images.to(device)
+            if images.dtype == torch.uint8:
+                images = prepare_cached_inputs(images, config["normalization"])
+            with torch.autocast(
+                device_type=device.type,
+                enabled=device.type == "cuda" and config.get("precision") == "auto",
+            ):
+                features.append(model.encoder(images).float().cpu())
         labels.append(targets)
     return TensorDataset(torch.cat(features), torch.cat(labels))
 
@@ -123,7 +159,9 @@ def train(config: dict) -> None:
     }
     if is_ssl:
         provenance["ssl_checkpoint"] = file_hash(config["ssl_checkpoint"])
-    weights = positive_weights(train_frame)
+    weights = positive_weights(train_frame, config.get("pos_weight_max"))
+    if config.get("training_cache_manifest"):
+        provenance["training_cache_manifest"] = file_hash(config["training_cache_manifest"])
     config["provenance"] = provenance
     config["positive_weights"] = weights.tolist()
     signature = config_signature(config)
@@ -151,6 +189,7 @@ def train(config: dict) -> None:
         freeze_encoder=linear,
         pretrained=config["imagenet_pretrained"] and resumed is None,
         weights_name=config.get("imagenet_weights"),
+        standardize_features=linear and config.get("standardize_features", False),
     )
     if is_ssl:
         source = torch.load(config["ssl_checkpoint"], map_location="cpu", weights_only=False)
@@ -160,6 +199,11 @@ def train(config: dict) -> None:
         for key in ("encoder", "image_size"):
             if source_config.get(key) != config[key]:
                 raise ValueError(f"SSL checkpoint {key} does not match downstream comparison")
+        source_normalization = source_config.get("augmentation", {}).get(
+            "normalization", {"mean": 0.5, "std": 0.5}
+        )
+        if source_normalization != config.get("normalization", {"mean": 0.5, "std": 0.5}):
+            raise ValueError("SSL checkpoint normalization does not match downstream preprocessing")
         model.load_pretrained_encoder(source)
     model.to(device)
     parameters = [p for p in model.parameters() if p.requires_grad]
@@ -172,12 +216,19 @@ def train(config: dict) -> None:
         parameters, lr=float(config["learning_rate"]), weight_decay=float(config["weight_decay"])
     )
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(config["epochs"]))
+        if config.get("schedule") == "cosine" and not linear
+        else None
+    )
     criterion = nn.BCEWithLogitsLoss(pos_weight=weights.to(device))
     start_epoch, best_score, best_epoch, history = 1, -np.inf, 0, []
     if resumed is not None:
         model.load_state_dict(resumed["model"])
         optimizer.load_state_dict(resumed["optimizer"])
         scaler.load_state_dict(resumed["scaler"])
+        if scheduler is not None:
+            scheduler.load_state_dict(resumed["scheduler"])
         start_epoch = int(resumed["epoch"]) + 1
         best_score, best_epoch, history = (
             resumed["best_score"],
@@ -193,13 +244,47 @@ def train(config: dict) -> None:
     if linear:
         print("Extracting frozen training/development features once", flush=True)
         train_data = extract_features(
-            model, train_frame, size, batch, workers, device, config["multiprocessing_context"]
+            model,
+            train_frame,
+            size,
+            batch,
+            workers,
+            device,
+            config["multiprocessing_context"],
+            config,
         )
         dev_data = extract_features(
-            model, dev_frame, size, batch, workers, device, config["multiprocessing_context"]
+            model,
+            dev_frame,
+            size,
+            batch,
+            workers,
+            device,
+            config["multiprocessing_context"],
+            config,
         )
         train_model = model.classifier
+        if config.get("standardize_features") and resumed is None:
+            features = train_data.tensors[0]
+            with torch.no_grad():
+                train_model.mean.copy_(features.mean(0))
+                train_model.std.copy_(features.std(0).clamp_min(1e-6))
+                if config.get("notebook_sampling"):
+                    fresh_head = nn.Linear(features.shape[1], len(TARGETS)).to(device)
+                    train_model.linear.load_state_dict(fresh_head.state_dict())
         loader_workers = 0
+    elif config.get("cached_downstream"):
+        train_data = CachedTargetDataset(
+            train_frame,
+            config["downstream_cache_path"],
+            size,
+            config.get("training_cache_manifest"),
+        )
+        dev_data = CachedTargetDataset(
+            dev_frame, config["downstream_cache_path"], size, config.get("training_cache_manifest")
+        )
+        train_model = model
+        loader_workers = workers
     else:
         train_data = CheXpertDataset(
             train_frame, supervised_transform(size, True, config["supervised_augmentation"])
@@ -209,10 +294,19 @@ def train(config: dict) -> None:
         loader_workers = workers
     shuffle_generator = torch.Generator()
     worker_generator = torch.Generator()
+    sampler_options = {
+        "batch_size": batch,
+        "sampler": RandomSampler(train_data, generator=shuffle_generator),
+    }
+    batch_sampler = None
+    if config.get("notebook_sampling"):
+        batch_sampler = NotebookBatchSampler(
+            len(train_data), batch, int(config["seed"]), "linear" if linear else "finetune"
+        )
+        sampler_options = {"batch_sampler": batch_sampler}
     train_loader = DataLoader(
         train_data,
-        batch_size=batch,
-        sampler=RandomSampler(train_data, generator=shuffle_generator),
+        **sampler_options,
         generator=worker_generator,
         num_workers=loader_workers,
         multiprocessing_context=config["multiprocessing_context"] if loader_workers else None,
@@ -224,6 +318,7 @@ def train(config: dict) -> None:
         shuffle=False,
         num_workers=loader_workers,
         multiprocessing_context=config["multiprocessing_context"] if loader_workers else None,
+        generator=torch.Generator().manual_seed(0),
     )
     if resumed is not None:
         restore_rng_state(resumed["rng_state"])
@@ -233,6 +328,8 @@ def train(config: dict) -> None:
     )
     total_started = time.perf_counter()
     for epoch in range(start_epoch, int(config["epochs"]) + 1):
+        if batch_sampler is not None:
+            batch_sampler.epoch = epoch - 1
         shuffle_generator.manual_seed(int(config["seed"]) + epoch)
         worker_generator.manual_seed(int(config["seed"]) + epoch)
         if history and epoch - 1 - best_epoch >= int(config["early_stopping_patience"]):
@@ -246,6 +343,13 @@ def train(config: dict) -> None:
         loss_sum, records = 0.0, 0
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
+            if inputs.dtype == torch.uint8:
+                inputs = augment_grayscale_batch(
+                    inputs,
+                    size,
+                    {**config["supervised_augmentation"], "normalization": config["normalization"]},
+                    channels_last=False,
+                )
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp and not linear):
                 loss = criterion(train_model(inputs), targets)
@@ -256,7 +360,15 @@ def train(config: dict) -> None:
             scaler.update()
             loss_sum += loss.item() * len(inputs)
             records += len(inputs)
-        truths, scores = predict(train_model, dev_loader, device)
+        if scheduler is not None:
+            scheduler.step()
+        truths, scores = predict(
+            train_model,
+            dev_loader,
+            device,
+            config.get("normalization"),
+            amp=amp and not linear and config.get("cached_downstream", False),
+        )
         metrics = multilabel_metrics(truths, scores)
         metrics.update(
             epoch=epoch,
@@ -274,7 +386,9 @@ def train(config: dict) -> None:
         )
         if np.isfinite(score) and score > best_score:
             best_score, best_epoch = score, epoch
-            thresholds = select_thresholds(truths, scores)
+            thresholds = select_thresholds(
+                truths, scores, config.get("threshold_method", "balanced_accuracy")
+            )
             atomic_torch_save(
                 {
                     "model": model.state_dict(),
@@ -291,6 +405,7 @@ def train(config: dict) -> None:
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scaler": scaler.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler else None,
                 "config": config,
                 "epoch": epoch,
                 "best_score": best_score,
@@ -304,6 +419,23 @@ def train(config: dict) -> None:
     if not math.isfinite(best_score):
         raise ValueError("Development AUROC is undefined; no selectable checkpoint was produced")
     best_metrics = next(row for row in history if row["epoch"] == best_epoch)
+    best = torch.load(output_dir / "best.pt", map_location=device, weights_only=False)
+    model.load_state_dict(best["model"])
+    truths, scores = predict(
+        train_model,
+        dev_loader,
+        device,
+        config.get("normalization"),
+        amp=amp and not linear and config.get("cached_downstream", False),
+    )
+    from chexpert_ssl.metrics import threshold_metrics
+
+    best_metrics = {
+        **best_metrics,
+        **threshold_metrics(
+            truths, scores, best["thresholds"], notebook=config.get("threshold_method") == "youden"
+        ),
+    }
     save_json(
         output_dir / "metrics.json",
         {

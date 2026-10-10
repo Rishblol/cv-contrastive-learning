@@ -450,3 +450,107 @@ def test_aggregation_separates_partitions_and_rejects_duplicate_pairs(tmp_path):
     )
     with pytest.raises(ValueError, match="Duplicate"):
         collect_results(tmp_path, "final_validation")
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_notebook_profile_pretraining_and_transfer(tmp_path, synthetic_data, method):
+    matrix = load_config(Path("configs/experiments/notebook_reference.yaml"))
+    reference = next(c for c in build_plan(matrix)["pretrain"] if c["method"] == method)
+    config = {**reference, **pretrain_config(tmp_path, synthetic_data, method)}
+    config["cache_source_manifest"] = str(synthetic_data[0])
+    config.update(
+        batch_size=4,
+        notebook_schedule=True,
+        warmup_epochs=2,
+        monitor_feature_spread=True,
+        feature_spread_samples=4,
+    )
+    config["augmentation"] = reference["augmentation"]
+    config["ssl"].update(bn_splits=2, positive_as_anchor=True, prototype_freeze_epochs=1)
+    train_pretrain(config)
+    checkpoint = torch.load(Path(config["output_dir"]) / "last.pt", weights_only=False)
+    assert np.isfinite(checkpoint["history"][0]["feature_spread"])
+    if method == "swav":
+        assert checkpoint["model"]["step"].item() == 1
+    down = downstream_config(
+        tmp_path, synthetic_data, "ssl_linear", str(Path(config["output_dir"]) / "last.pt")
+    )
+    down.update(
+        ssl_method=method,
+        standardize_features=True,
+        threshold_method="youden",
+        pos_weight_max=50,
+        normalization=matrix["downstream_overrides"]["normalization"],
+        supervised_augmentation=matrix["downstream_overrides"]["supervised_augmentation"],
+    )
+    train_downstream(down)
+    run = Path(down["output_dir"])
+    lock = lock_run(run, "Synthetic notebook-reference transfer test")
+    evaluate(
+        {
+            "checkpoint": str(run / "best.pt"),
+            "thresholds": str(run / "thresholds.json"),
+            "selection_lock": str(lock),
+            "manifest": str(synthetic_data[2]),
+            "output_dir": str(tmp_path / "evaluation"),
+            "batch_size": 2,
+            "seed": 42,
+            "bootstrap_samples": 5,
+            "per_label_bootstrap": True,
+            "device": "cpu",
+        }
+    )
+    metrics = load_config(tmp_path / "evaluation" / "metrics.json")
+    assert set(metrics["per_label_auroc_ci95"]) == set(TARGETS)
+
+
+@pytest.mark.parametrize("mode", ["supervised", "ssl_linear"])
+def test_notebook_cached_downstream_resume(tmp_path, synthetic_data, monkeypatch, mode):
+    import scripts.train_downstream as entry
+
+    train, dev, _, _ = synthetic_data
+    source = tmp_path / "all_training.csv"
+    pd.concat([read_manifest(train), read_manifest(dev)], ignore_index=True).to_csv(
+        source, index=False
+    )
+    pretrained = pretrain_config(tmp_path, synthetic_data, "simclr")
+    pretrained["augmentation"]["normalization"] = {"mean": 0.449, "std": 0.226}
+    train_pretrain(pretrained)
+    config = downstream_config(
+        tmp_path, synthetic_data, mode, str(Path(pretrained["output_dir"]) / "last.pt")
+    )
+    reference = load_config(Path("configs/experiments/notebook_reference.yaml"))[
+        "downstream_overrides"
+    ]
+    config.update(
+        epochs=2,
+        cached_downstream=True,
+        training_cache_manifest=str(source),
+        downstream_cache_path=str(tmp_path / "downstream.npy"),
+        normalization=reference["normalization"],
+        supervised_augmentation=reference["supervised_augmentation"],
+        schedule="cosine",
+        standardize_features=mode == "ssl_linear",
+        threshold_method="youden",
+        pos_weight_max=50,
+        notebook_sampling=True,
+    )
+    entry.train(config)
+    expected = torch.load(Path(config["output_dir"]) / "last.pt", weights_only=False)
+    interrupted = {**config, "output_dir": str(tmp_path / "interrupted")}
+    original_save = entry.atomic_torch_save
+
+    def interrupt_after_checkpoint(payload, path):
+        original_save(payload, path)
+        if path.name == "last.pt" and payload["epoch"] == 1:
+            raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(entry, "atomic_torch_save", interrupt_after_checkpoint)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        entry.train(interrupted)
+    monkeypatch.setattr(entry, "atomic_torch_save", original_save)
+    entry.train(interrupted)
+    actual = torch.load(Path(interrupted["output_dir"]) / "last.pt", weights_only=False)
+    for key in expected["model"]:
+        torch.testing.assert_close(actual["model"][key], expected["model"][key], rtol=0, atol=0)
+    assert actual["scheduler"] == expected["scheduler"]

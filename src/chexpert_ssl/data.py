@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterable
 from hashlib import sha256
@@ -98,7 +99,12 @@ def select_patient_cohort(
     if len(set(identities)) != len(identifiers) or not set(identities).issubset(available):
         raise ValueError("Cohort contains duplicate or unknown patient IDs")
     patients = {available[identity] for identity in identities}
-    expected_count = max(1, round(frame.patient_id.nunique() * fraction))
+    rounding = cohort.get("budget_rounding", "round")
+    if rounding not in {"round", "ceil"}:
+        raise ValueError("Unknown cohort budget rounding")
+    expected_count = max(
+        1, (math.ceil if rounding == "ceil" else round)(frame.patient_id.nunique() * fraction)
+    )
     if len(patients) != expected_count:
         raise ValueError("Cohort patient count does not match the configured budget")
     selected = frame.loc[frame.patient_id.isin(patients)].reset_index(drop=True)
@@ -200,7 +206,7 @@ def exclude_development_patients(
 
 
 def split_by_patient(
-    frame: pd.DataFrame, dev_fraction: float, seed: int
+    frame: pd.DataFrame, dev_fraction: float, seed: int, random_state: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create a deterministic patient-disjoint development partition.
 
@@ -213,7 +219,7 @@ def split_by_patient(
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
     if len(patients) < 2:
         raise ValueError("At least two patients are required for a train/development split")
-    rng = np.random.default_rng(seed)
+    rng = np.random.RandomState(seed) if random_state else np.random.default_rng(seed)
     rng.shuffle(patients)
     dev_count = min(len(patients) - 1, max(1, round(len(patients) * dev_fraction)))
     dev_patients = set(patients[:dev_count])
@@ -236,17 +242,25 @@ def sample_patient_budget(frame: pd.DataFrame, fraction: float, seed: int) -> pd
 
 
 def nested_patient_ids(
-    frame: pd.DataFrame, fractions: Iterable[float], seed: int
+    frame: pd.DataFrame,
+    fractions: Iterable[float],
+    seed: int,
+    random_state: bool = False,
+    budget_rounding: str = "round",
 ) -> dict[float, list[str]]:
     """Return nested deterministic patient samples for every requested budget."""
     patients = np.array(sorted(frame["patient_id"].astype(str).unique()))
-    rng = np.random.default_rng(seed)
+    if budget_rounding not in {"round", "ceil"}:
+        raise ValueError("Unknown budget rounding")
+    rng = np.random.RandomState(seed) if random_state else np.random.default_rng(seed)
     rng.shuffle(patients)
     result: dict[float, list[str]] = {}
     for fraction in sorted({float(value) for value in fractions}):
         if not 0 < fraction <= 1:
             raise ValueError("All fractions must be in (0, 1]")
-        count = max(1, round(len(patients) * fraction))
+        count = max(
+            1, (math.ceil if budget_rounding == "ceil" else round)(len(patients) * fraction)
+        )
         result[fraction] = patients[:count].tolist()
     return result
 
@@ -287,6 +301,37 @@ class CheXpertDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         return image, targets
 
 
+class CachedTargetDataset(Dataset):
+    """Targets paired with bilinear-resized grayscale uint8 images from a memmap."""
+
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        cache_path: str,
+        image_size: int,
+        source_manifest: str | None = None,
+    ):
+        from .image_cache import ensure_grayscale_cache
+        from .utils import artifact_lock
+
+        path = Path(cache_path)
+        source = read_manifest(source_manifest) if source_manifest else frame
+        reject_final_partition(source_manifest or path, source)
+        lookup = {value: i for i, value in enumerate(source.image_path)}
+        self.indices = [lookup[value] for value in frame.image_path]
+        with artifact_lock(path.with_suffix(".lock")):
+            self.images, _ = ensure_grayscale_cache(source, path, image_size)
+        self.targets = torch.tensor(frame[target_columns()].to_numpy(dtype=np.float32))
+
+    def __len__(self):
+        return len(self.targets)
+
+    def __getitem__(self, index):
+        return torch.from_numpy(
+            np.array(self.images[self.indices[index]], copy=True)
+        ), self.targets[index]
+
+
 class SimCLRDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """Dataset returning two independently augmented views of each image."""
 
@@ -308,6 +353,20 @@ def supervised_transform(
     image_size: int, train: bool, config: dict | None = None
 ) -> transforms.Compose:
     config = config or {}
+    if config.get("notebook_preprocessing"):
+        normalization = config["normalization"]
+        return transforms.Compose(
+            [
+                transforms.Grayscale(num_output_channels=3),
+                transforms.Resize(
+                    (image_size, image_size), interpolation=transforms.InterpolationMode.BILINEAR
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=(normalization["mean"],) * 3, std=(normalization["std"],) * 3
+                ),
+            ]
+        )
     operations: list[Callable] = [transforms.Resize((image_size, image_size))]
     if train:
         operations.append(

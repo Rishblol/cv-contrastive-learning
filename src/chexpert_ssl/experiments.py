@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from .ssl_methods import METHODS
-from .utils import load_config, validate_training_config
+from .utils import load_config, merge_config, validate_training_config
 
 
 def build_plan(matrix: dict) -> dict[str, list[dict]]:
+    if matrix.get("execution_order", "method") not in {"method", "notebook"}:
+        raise ValueError("Unknown experiment execution order")
     if set(matrix["pretrain_configs"]) != set(METHODS):
         raise ValueError("The primary matrix must include SimCLR, MoCo, BYOL, NNCLR, and SwAV")
     if set(matrix["downstream_templates"]) != {"ssl_linear", "ssl_finetune", "scratch", "imagenet"}:
@@ -42,6 +44,13 @@ def build_plan(matrix: dict) -> dict[str, list[dict]]:
     )
     for method in METHODS:
         config = load_config(Path(matrix["pretrain_configs"][method]))
+        config = merge_config(config, matrix.get("pretrain_overrides", {}))
+        config = merge_config(config, matrix.get("method_overrides", {}).get(method, {}))
+        if matrix.get("pretrain_output_root"):
+            config["output_dir"] = str(
+                Path(matrix["pretrain_output_root"])
+                / f"{method}-{config['encoder']}-seed{config['seed']}"
+            )
         validate_training_config(config, "pretrain")
         if config["method"] != method:
             raise ValueError("Pretraining config method does not match matrix arm")
@@ -51,7 +60,8 @@ def build_plan(matrix: dict) -> dict[str, list[dict]]:
             )
         pretrain.append(config)
     templates = {
-        key: load_config(Path(path)) for key, path in matrix["downstream_templates"].items()
+        key: merge_config(load_config(Path(path)), matrix.get("downstream_overrides", {}))
+        for key, path in matrix["downstream_templates"].items()
     }
     common = (
         "encoder",
@@ -87,15 +97,30 @@ def build_plan(matrix: dict) -> dict[str, list[dict]]:
                 for protocol in ("ssl_linear", "ssl_finetune")
             ]
             arms += [("scratch", "scratch"), ("imagenet", "imagenet")]
+            if matrix.get("execution_order") == "notebook":
+                arms = [("scratch", "scratch"), ("imagenet", "imagenet")]
+                arms += [
+                    (method, protocol)
+                    for protocol in ("ssl_linear", "ssl_finetune")
+                    for method in METHODS
+                ]
             for method, protocol in arms:
                 config = dict(templates[protocol])
+                config = merge_config(
+                    config, matrix.get("protocol_overrides", {}).get(protocol, {})
+                )
+                if protocol != "ssl_linear" and matrix.get("epochs_by_budget"):
+                    config["epochs"] = matrix["epochs_by_budget"][fraction]
                 config.update(seed=seed, label_fraction=fraction, sampled_patients=cohort)
                 if method in METHODS:
                     source = next(c for c in pretrain if c["method"] == method)
                     config.update(
                         mode=protocol,
                         ssl_method=method,
-                        ssl_checkpoint=str(Path(source["output_dir"]) / "best.pt"),
+                        ssl_checkpoint=str(
+                            Path(source["output_dir"])
+                            / matrix.get("transfer_checkpoint", "best.pt")
+                        ),
                     )
                 else:
                     config.pop("ssl_method", None)
@@ -116,6 +141,11 @@ def build_plan(matrix: dict) -> dict[str, list[dict]]:
                         "batch_size": config["batch_size"],
                         "num_workers": config["num_workers"],
                         "bootstrap_samples": matrix["bootstrap_samples"],
+                        **(
+                            {"per_label_bootstrap": True}
+                            if matrix.get("per_label_bootstrap")
+                            else {}
+                        ),
                         "output_dir": str(Path(matrix["evaluation_output_root"]) / run_id),
                     }
                 )

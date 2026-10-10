@@ -19,6 +19,7 @@ from chexpert_ssl.data import (
 )
 from chexpert_ssl.metrics import (
     multilabel_metrics,
+    patient_bootstrap_auroc,
     patient_bootstrap_macro_auroc,
     threshold_metrics,
 )
@@ -74,11 +75,22 @@ def evaluate(config: dict) -> None:
     }
     device = device_from_config(config.get("device", "auto"))
     # All weights come from the selected checkpoint; evaluation never downloads initialization weights.
-    model = MultiLabelClassifier(training["encoder"], len(TARGETS), pretrained=False)
+    model = MultiLabelClassifier(
+        training["encoder"],
+        len(TARGETS),
+        pretrained=False,
+        standardize_features=training.get("standardize_features", False)
+        and training["mode"] in {"ssl_linear", "simclr_linear"},
+    )
     model.load_state_dict(checkpoint["model"], strict=True)
     model.to(device).eval()
     loader = DataLoader(
-        CheXpertDataset(frame, supervised_transform(training["image_size"], False)),
+        CheXpertDataset(
+            frame,
+            supervised_transform(
+                training["image_size"], False, training.get("supervised_augmentation")
+            ),
+        ),
         batch_size=int(config["batch_size"]),
         shuffle=False,
         num_workers=int(config.get("num_workers", 0)),
@@ -90,21 +102,43 @@ def evaluate(config: dict) -> None:
     probabilities = []
     with torch.inference_mode():
         for images, _ in loader:
-            probabilities.append(torch.sigmoid(model(images.to(device))).float().cpu().numpy())
+            with torch.autocast(
+                device_type=device.type,
+                enabled=device.type == "cuda"
+                and training.get("cached_downstream")
+                and training["precision"] == "auto",
+            ):
+                logits = model(images.to(device))
+            probabilities.append(torch.sigmoid(logits.float()).cpu().numpy())
     scores = np.concatenate(probabilities)
     if not np.isfinite(scores).all():
         raise FloatingPointError("Nonfinite evaluation probabilities")
     targets = frame[target_columns()].to_numpy(dtype=np.float32)
     thresholds = load_config(Path(config["thresholds"]))
     metrics = multilabel_metrics(targets, scores)
-    metrics.update(threshold_metrics(targets, scores, thresholds))
-    metrics["macro_auroc_ci95"] = patient_bootstrap_macro_auroc(
-        targets,
-        scores,
-        frame.patient_id.to_numpy(),
-        int(config["seed"]),
-        int(config["bootstrap_samples"]),
+    metrics.update(
+        threshold_metrics(
+            targets, scores, thresholds, notebook=training.get("threshold_method") == "youden"
+        )
     )
+    if config.get("per_label_bootstrap"):
+        intervals = patient_bootstrap_auroc(
+            targets,
+            scores,
+            frame.patient_id.to_numpy(),
+            int(config["seed"]),
+            int(config["bootstrap_samples"]),
+        )
+        metrics["macro_auroc_ci95"] = intervals["macro_auroc"]
+        metrics["per_label_auroc_ci95"] = intervals["per_label"]
+    else:
+        metrics["macro_auroc_ci95"] = patient_bootstrap_macro_auroc(
+            targets,
+            scores,
+            frame.patient_id.to_numpy(),
+            int(config["seed"]),
+            int(config["bootstrap_samples"]),
+        )
     metrics.update(
         partition="final_validation",
         source_run_id=lock["source_run_id"],

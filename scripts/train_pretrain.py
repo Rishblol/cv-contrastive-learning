@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from torchvision.utils import save_image
 from chexpert_ssl.data import assert_patient_disjoint, read_manifest, reject_final_partition
 from chexpert_ssl.gpu_augment import augment_grayscale_batch
 from chexpert_ssl.image_cache import ensure_grayscale_cache
+from chexpert_ssl.sampling import NotebookBatchSampler
 from chexpert_ssl.ssl_methods import METHODS, build_ssl_method, encoder_state_dict
 from chexpert_ssl.utils import (
     artifact_lock,
@@ -46,6 +48,29 @@ def training_signature(config: dict, method: str, cache_metadata: dict) -> str:
     return config_signature({**config, "method": method, "cache": cache_metadata})
 
 
+def notebook_learning_rate(step: int, total: int, warm: int, base: float) -> float:
+    if step < warm:
+        return base * (step + 1) / max(1, warm)
+    progress = (step - warm) / max(1, total - warm)
+    return base * (0.001 + 0.999 * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+@torch.no_grad()
+def feature_spread(encoder, dataset, size, normalization, device, sample_count=512):
+    encoder.eval()
+    indices = np.sort(
+        np.random.RandomState(0).choice(
+            len(dataset), min(sample_count, len(dataset)), replace=False
+        )
+    )
+    images = torch.from_numpy(np.stack([dataset[int(i)] for i in indices])).to(device)
+    inputs = images.float().div(255).unsqueeze(1)
+    inputs = (inputs - normalization["mean"]) / normalization["std"]
+    features = torch.nn.functional.normalize(encoder(inputs.expand(-1, 3, -1, -1)).float(), dim=1)
+    encoder.train()
+    return float(features.std(dim=0).mean() * math.sqrt(features.shape[1]))
+
+
 def save_augmentation_preview(
     dataset,
     image_size: int,
@@ -58,11 +83,22 @@ def save_augmentation_preview(
     count = min(8, len(dataset))
     indices = np.sort(np.random.default_rng(seed).choice(len(dataset), count, replace=False))
     grayscale = torch.from_numpy(np.stack([dataset[int(index)] for index in indices])).to(device)
-    original = grayscale.float().div(255).sub(0.5).div(0.5).unsqueeze(1).expand(-1, 3, -1, -1)
+    normalization = augmentation.get("normalization", {"mean": 0.5, "std": 0.5})
+    original = grayscale.float().div(255).sub(normalization["mean"]).div(normalization["std"])
+    original = original.unsqueeze(1).expand(-1, 3, -1, -1)
     first = augment_grayscale_batch(grayscale, image_size, augmentation, channels_last)
     second = augment_grayscale_batch(grayscale, image_size, augmentation, channels_last)
     preview = torch.cat((original, first, second)).cpu()
-    save_image(preview, output_path, normalize=True, value_range=(-1, 1), nrow=count)
+    save_image(
+        preview,
+        output_path,
+        normalize=True,
+        value_range=(
+            -normalization["mean"] / normalization["std"],
+            (1 - normalization["mean"]) / normalization["std"],
+        ),
+        nrow=count,
+    )
 
 
 @managed_run
@@ -113,15 +149,23 @@ def train(config: dict) -> None:
     cache_path = Path(
         config.get("cache_path", f"data/processed/cache/pretrain_gray_{image_size}.npy")
     )
+    cache_frame = frame
+    if config.get("cache_source_manifest"):
+        cache_frame = read_manifest(config["cache_source_manifest"], labeled=False)
+        reject_final_partition(config["cache_source_manifest"], cache_frame)
+        config["provenance"]["cache_source_manifest"] = file_hash(config["cache_source_manifest"])
     with artifact_lock(cache_path.with_suffix(".lock")):
         dataset, cache_built = ensure_grayscale_cache(
-            frame,
+            cache_frame,
             cache_path,
             image_size,
             workers=int(config.get("cache_workers", 16)),
             log_interval=int(config.get("cache_log_interval", 10_000)),
         )
         cache_metadata = json.loads(cache_path.with_suffix(".json").read_text(encoding="utf-8"))
+    if config.get("cache_source_manifest"):
+        lookup = {value: index for index, value in enumerate(cache_frame.image_path)}
+        dataset = torch.utils.data.Subset(dataset, [lookup[value] for value in frame.image_path])
     signature = training_signature(config, method_name, cache_metadata)
 
     if device.type == "cuda":
@@ -158,9 +202,22 @@ def train(config: dict) -> None:
     if workers > 0:
         loader_options["prefetch_factor"] = int(config.get("prefetch_factor", 4))
         loader_options["multiprocessing_context"] = config["multiprocessing_context"]
+    batch_sampler = None
+    if config.get("notebook_sampling"):
+        batch_sampler = NotebookBatchSampler(
+            len(dataset), int(config["batch_size"]), int(config["seed"]), "ssl"
+        )
+        for key in ("batch_size", "sampler", "drop_last"):
+            loader_options.pop(key)
+        loader_options["batch_sampler"] = batch_sampler
     loader = DataLoader(**loader_options)
+    steps_per_epoch = min(len(loader), int(config.get("max_steps_per_epoch", len(loader))))
 
     model = build_ssl_method(method_name, config.get("encoder", "resnet18"), config.get("ssl", {}))
+    if method_name == "swav" and config["ssl"].get("prototype_freeze_epochs") is not None:
+        model.freeze_prototype_steps = (
+            int(config["ssl"]["prototype_freeze_epochs"]) * steps_per_epoch
+        )
     if channels_last:
         model = model.to(device=device, memory_format=torch.channels_last)
     else:
@@ -173,6 +230,10 @@ def train(config: dict) -> None:
         fused=fused,
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=int(config["epochs"]))
+    notebook_schedule = bool(config.get("notebook_schedule", False))
+    base_lr = float(config["learning_rate"]) * (
+        int(config["batch_size"]) / 256 if notebook_schedule else 1
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
 
     start_epoch = 1
@@ -198,6 +259,7 @@ def train(config: dict) -> None:
 
     save_run_metadata(output_dir, config)
     if not history:
+        preview_rng = capture_rng_state()
         save_augmentation_preview(
             dataset,
             image_size,
@@ -207,6 +269,8 @@ def train(config: dict) -> None:
             output_dir / "augmentation_pairs.png",
             int(config["seed"]),
         )
+        if config.get("notebook_sampling"):
+            restore_rng_state(preview_rng)
     print(
         f"mixed_precision={amp} channels_last={channels_last} "
         f"workers={workers} prefetch_factor={config.get('prefetch_factor', 4)} "
@@ -215,6 +279,8 @@ def train(config: dict) -> None:
     )
 
     for epoch in range(start_epoch, int(config["epochs"]) + 1):
+        if batch_sampler is not None:
+            batch_sampler.epoch = epoch - 1
         shuffle_generator.manual_seed(int(config["seed"]) + epoch)
         worker_generator.manual_seed(int(config["seed"]) + epoch)
         epoch_started = time.perf_counter()
@@ -222,10 +288,21 @@ def train(config: dict) -> None:
             torch.cuda.reset_peak_memory_stats(device)
         model.train()
         total_loss = torch.zeros((), device=device, dtype=torch.float32)
-        log_every = max(1, len(loader) // 10)
+        log_every = max(1, steps_per_epoch // 10)
         interval_started = time.perf_counter()
         last_logged_step = 0
         for batch_index, grayscale in enumerate(loader, start=1):
+            if batch_index > steps_per_epoch:
+                break
+            step = (epoch - 1) * steps_per_epoch + batch_index - 1
+            if notebook_schedule:
+                for group in optimizer.param_groups:
+                    group["lr"] = notebook_learning_rate(
+                        step,
+                        int(config["epochs"]) * steps_per_epoch,
+                        int(config.get("warmup_epochs", 2)) * steps_per_epoch,
+                        base_lr,
+                    )
             grayscale = grayscale.to(device, non_blocking=True)
             first = augment_grayscale_batch(grayscale, image_size, augmentation, channels_last)
             second = augment_grayscale_batch(grayscale, image_size, augmentation, channels_last)
@@ -241,9 +318,9 @@ def train(config: dict) -> None:
             scaler.step(optimizer)
             scaler.update()
             if scaler.get_scale() >= previous_scale:
-                model.after_optimizer_step((epoch - 1) / max(1, int(config["epochs"])))
+                model.after_optimizer_step(step / (int(config["epochs"]) * steps_per_epoch))
             total_loss.add_(loss.detach().float())
-            if batch_index % log_every == 0 or batch_index == len(loader):
+            if batch_index % log_every == 0 or batch_index == steps_per_epoch:
                 if device.type == "cuda":
                     allocated_gb = torch.cuda.memory_allocated(device) / 2**30
                 else:
@@ -252,7 +329,7 @@ def train(config: dict) -> None:
                 interval_seconds = time.perf_counter() - interval_started
                 interval_steps = batch_index - last_logged_step
                 print(
-                    f"method={method_name} epoch={epoch} step={batch_index}/{len(loader)} "
+                    f"method={method_name} epoch={epoch} step={batch_index}/{steps_per_epoch} "
                     f"loss={reported_loss:.4f} steps_per_sec={interval_steps / interval_seconds:.2f} "
                     f"gpu_memory_gb={allocated_gb:.2f}",
                     flush=True,
@@ -260,25 +337,35 @@ def train(config: dict) -> None:
                 last_logged_step = batch_index
                 interval_started = time.perf_counter()
 
-        scheduler.step()
-        mean_loss = float((total_loss / max(1, len(loader))).item())
+        if not notebook_schedule:
+            scheduler.step()
+        mean_loss = float((total_loss / max(1, steps_per_epoch)).item())
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             peak_memory_gb = torch.cuda.max_memory_allocated(device) / 2**30
         else:
             peak_memory_gb = 0.0
         epoch_seconds = time.perf_counter() - epoch_started
-        images_per_second = len(loader) * int(config["batch_size"]) / max(epoch_seconds, 1e-9)
+        images_per_second = steps_per_epoch * int(config["batch_size"]) / max(epoch_seconds, 1e-9)
         history.append(
             {
                 "epoch": epoch,
                 "train_loss": mean_loss,
-                "learning_rate": scheduler.get_last_lr()[0],
+                "learning_rate": optimizer.param_groups[0]["lr"],
                 "seconds": epoch_seconds,
                 "images_per_second": images_per_second,
                 "peak_gpu_memory_gb": peak_memory_gb,
             }
         )
+        if config.get("monitor_feature_spread"):
+            history[-1]["feature_spread"] = feature_spread(
+                model.encoder,
+                dataset,
+                image_size,
+                augmentation.get("normalization", {"mean": 0.5, "std": 0.5}),
+                device,
+                int(config.get("feature_spread_samples", 512)),
+            )
         print(
             f"method={method_name} epoch={epoch} train_loss={mean_loss:.4f} "
             f"seconds={epoch_seconds:.1f} images_per_second={images_per_second:.1f} "
