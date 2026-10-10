@@ -101,6 +101,57 @@ def merge_config(base: dict, overrides: dict) -> dict:
     return result
 
 
+def normalize_config(config: dict) -> dict:
+    """Resolve numeric experiment settings consistently across YAML and JSON.
+
+    YAML loaders can interpret scientific notation such as ``1e-05`` as a
+    string. Normalize declared numeric keys rather than arbitrary text values.
+    """
+    float_keys = {
+        "learning_rate",
+        "encoder_learning_rate",
+        "weight_decay",
+        "label_fraction",
+        "temperature",
+        "momentum",
+        "sinkhorn_epsilon",
+        "dev_fraction",
+    }
+    integer_keys = {
+        "seed",
+        "batch_size",
+        "epochs",
+        "image_size",
+        "num_workers",
+        "prefetch_factor",
+        "cache_workers",
+        "cache_log_interval",
+        "torch_num_threads",
+        "early_stopping_patience",
+        "bootstrap_samples",
+        "hidden_dim",
+        "projection_dim",
+        "queue_size",
+        "prototype_count",
+        "prototype_freeze_steps",
+    }
+    resolved = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            value = normalize_config(value)
+        elif isinstance(value, list):
+            value = [normalize_config(item) if isinstance(item, dict) else item for item in value]
+        if value is not None and key in float_keys:
+            value = float(value)
+        elif value is not None and key in integer_keys:
+            numeric = float(value)
+            if not math.isfinite(numeric) or not numeric.is_integer():
+                raise ValueError(f"{key} must be an integer")
+            value = int(numeric)
+        resolved[key] = value
+    return resolved
+
+
 def load_config(path: Path, _seen: tuple[Path, ...] = ()) -> dict[str, Any]:
     path = Path(path).resolve()
     if path in _seen:
@@ -115,7 +166,7 @@ def load_config(path: Path, _seen: tuple[Path, ...] = ()) -> dict[str, Any]:
     resolved: dict[str, Any] = {}
     for parent in parents:
         resolved = merge_config(resolved, load_config(path.parent / parent, (*_seen, path)))
-    return merge_config(resolved, config)
+    return normalize_config(merge_config(resolved, config))
 
 
 def file_hash(path: str | Path) -> str:
@@ -135,7 +186,11 @@ def implementation_hash(entrypoint: Path) -> str:
 
 
 def config_signature(config: dict) -> str:
-    payload = {key: value for key, value in config.items() if key not in {"output_dir", "resume"}}
+    payload = {
+        key: value
+        for key, value in normalize_config(config).items()
+        if key not in {"output_dir", "resume"}
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 

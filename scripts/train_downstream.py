@@ -112,6 +112,11 @@ def train(config: dict) -> None:
     is_ssl = mode != "supervised"
     linear = mode in {"ssl_linear", "simclr_linear"}
     actual_method = config.get("ssl_method") if is_ssl else None
+    config["identifier_normalization"] = {
+        "train_restored_rows": train_frame.attrs.get("patient_id_padding_restored_rows", 0),
+        "development_restored_rows": dev_frame.attrs.get("patient_id_padding_restored_rows", 0),
+        "cohort_restored_ids": train_frame.attrs.get("cohort_patient_id_padding_restored", 0),
+    }
     provenance = {
         key: file_hash(config[key])
         for key in ("train_manifest", "development_manifest", "sampled_patients")

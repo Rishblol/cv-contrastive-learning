@@ -23,6 +23,12 @@ _PATIENT_RE = re.compile(r"patient(\d+)", re.IGNORECASE)
 _STUDY_RE = re.compile(r"study(\d+)", re.IGNORECASE)
 
 
+def patient_identity(identifier: str) -> str:
+    """Compare decimal patient IDs independently of legacy zero-padding loss."""
+    value = str(identifier)
+    return value.lstrip("0") or "0" if re.fullmatch(r"[0-9]+", value) else value
+
+
 def read_manifest(path: str | Path, *, labeled: bool = True) -> pd.DataFrame:
     """Load prepared records without losing zero-padded patient/study identifiers."""
     frame = pd.read_csv(path, dtype={"patient_id": "string", "study_id": "string"})
@@ -50,8 +56,12 @@ def read_manifest(path: str | Path, *, labeled: bool = True) -> pd.DataFrame:
         expected = frame["Path"].map(
             lambda value: extract_identifier(value, _PATIENT_RE, "patient ID")
         )
-        if not expected.eq(frame.patient_id).all():
+        equivalent = expected.map(patient_identity).eq(frame.patient_id.map(patient_identity))
+        if not equivalent.all():
             raise ValueError(f"Manifest {path} has patient IDs inconsistent with source paths")
+        restored = int((~expected.eq(frame.patient_id)).sum())
+        frame["patient_id"] = expected.astype("string")
+        frame.attrs["patient_id_padding_restored_rows"] = restored
     return frame
 
 
@@ -76,13 +86,27 @@ def select_patient_cohort(
     identifiers = cohort.get("patient_ids", [])
     if not identifiers or any(not isinstance(value, str) for value in identifiers):
         raise ValueError("Cohort must contain nonempty string patient IDs")
-    patients = set(identifiers)
-    if len(patients) != len(identifiers) or not patients.issubset(set(frame.patient_id)):
+    # Source paths supply the canonical spelling. Resolve legacy cohort IDs by
+    # numeric identity without changing their membership, order, or file contents.
+    available = {}
+    for identifier in frame.patient_id.unique():
+        identity = patient_identity(identifier)
+        if identity in available and available[identity] != identifier:
+            raise ValueError("Manifest contains ambiguous zero-padded patient IDs")
+        available[identity] = identifier
+    identities = [patient_identity(identifier) for identifier in identifiers]
+    if len(set(identities)) != len(identifiers) or not set(identities).issubset(available):
         raise ValueError("Cohort contains duplicate or unknown patient IDs")
+    patients = {available[identity] for identity in identities}
     expected_count = max(1, round(frame.patient_id.nunique() * fraction))
     if len(patients) != expected_count:
         raise ValueError("Cohort patient count does not match the configured budget")
-    return frame.loc[frame.patient_id.isin(patients)].reset_index(drop=True)
+    selected = frame.loc[frame.patient_id.isin(patients)].reset_index(drop=True)
+    selected.attrs["cohort_patient_id_padding_restored"] = sum(
+        identifier != available[identity]
+        for identifier, identity in zip(identifiers, identities, strict=True)
+    )
+    return selected
 
 
 def resolve_target(value: object, target: str) -> int:
@@ -147,7 +171,7 @@ def prepare_manifest(
 
 def assert_patient_disjoint(*frames: pd.DataFrame) -> None:
     """Raise when any two supplied manifests contain the same patient."""
-    patient_sets = [set(frame["patient_id"].astype(str)) for frame in frames]
+    patient_sets = [set(frame["patient_id"].map(patient_identity)) for frame in frames]
     for index, current in enumerate(patient_sets):
         for other_index, other in enumerate(patient_sets[index + 1 :], start=index + 1):
             overlap = current.intersection(other)

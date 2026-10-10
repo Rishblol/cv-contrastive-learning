@@ -99,6 +99,10 @@ def train(config: dict) -> None:
     reject_final_partition(config["manifest"], frame)
     reject_final_partition(config["development_manifest"], development)
     assert_patient_disjoint(frame, development)
+    config["identifier_normalization"] = {
+        "manifest_restored_rows": frame.attrs.get("patient_id_padding_restored_rows", 0),
+        "development_restored_rows": development.attrs.get("patient_id_padding_restored_rows", 0),
+    }
     config["provenance"] = {
         key: file_hash(config[key]) for key in ("manifest", "development_manifest")
     }

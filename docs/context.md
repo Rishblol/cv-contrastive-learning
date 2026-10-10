@@ -454,6 +454,12 @@ training or final evaluation.
 - Historical cohorts are not rewritten. The repair helper remains available for
   older pretraining manifests. Small downstream smoke artifacts are derived from
   an existing saved cohort and remain separate from primary experiments.
+- For legacy manifests with stripped leading zeros, the loader restores the
+  source-path patient-ID spelling only after verifying numeric identity. Saved
+  cohorts resolve equivalent padded/unpadded IDs without changing membership or
+  file contents; duplicate aliases, unknown patients, and genuinely conflicting
+  IDs are rejected. Disjointness checks compare identities rather than padding,
+  and training metadata records normalization counts.
 
 ### Configuration, checkpoints, and final evaluation
 
@@ -496,6 +502,23 @@ evaluate -> aggregate` workflow. Before full pretraining, the runner requires
 completed test/smoke artifacts and an explicit anatomical augmentation review.
 Generated plans are immutable, failed jobs stop the sequence, and concurrent
 writes to an individual run are rejected.
+Numeric YAML/JSON settings are normalized before comparing plans or computing
+resume signatures, so scientific-notation strings and equivalent numbers do not
+create false configuration changes. Preparation, smoke, and aggregation do not
+materialize or require the full experiment plan.
+Runner smoke outputs are versioned by their resolved settings, source-input
+hashes, and training implementation. Compatible bounded jobs resume in place;
+changed versions use separate directories without replacing older checkpoints.
+The full-pretraining gate checks the matching version and its augmentation
+preview rather than an unrelated historical smoke run.
+
+The experiment matrix generates final-evaluation configurations directly; an
+independent placeholder evaluation YAML is unnecessary. Smoke YAMLs inherit
+shared settings rather than duplicating them. Generated package metadata,
+build products, and tool caches are excluded from version control. Cleanup may
+remove superseded smoke artifacts after a matching version completes, but keeps
+the matching smoke, primary checkpoints/metrics/plans, and persisted cohorts.
+It does not change resolved experiment settings or the scientific protocol.
 
 This update hardens the image-only lifecycle. VLM checkpoint review, adapter
 compatibility, VLM lifecycle hardening, calibration, paired-difference bootstrap,

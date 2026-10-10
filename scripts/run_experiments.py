@@ -8,7 +8,59 @@ import sys
 from pathlib import Path
 
 from chexpert_ssl.experiments import build_plan
-from chexpert_ssl.utils import file_hash, implementation_hash, load_config, save_json
+from chexpert_ssl.utils import (
+    config_signature,
+    file_hash,
+    implementation_hash,
+    load_config,
+    save_json,
+)
+
+
+def smoke_settings(matrix: dict) -> tuple[dict, dict, Path, str]:
+    """Version smoke outputs by their settings, source inputs, and implementation."""
+    pretrain = load_config(Path("configs/pretrain/simclr_smoke.yaml"))
+    downstream = load_config(Path("configs/downstream/smoke.yaml"))
+    full_pretrain = load_config(Path(matrix["pretrain_configs"]["simclr"]))
+    source_config = Path(matrix["downstream_templates"]["ssl_linear"])
+    source = load_config(source_config)
+    pretrain.update(
+        development_manifest=full_pretrain["development_manifest"],
+        augmentation=full_pretrain["augmentation"],
+        seed=full_pretrain["seed"],
+        resume=True,
+    )
+    downstream.update(
+        seed=source["seed"],
+        encoder=pretrain["encoder"],
+        image_size=pretrain["image_size"],
+        resume=True,
+    )
+    inputs = {
+        path: file_hash(path)
+        for path in {
+            full_pretrain["manifest"],
+            full_pretrain["development_manifest"],
+            source["train_manifest"],
+            source["development_manifest"],
+            source["sampled_patients"],
+        }
+    }
+    fingerprint = config_signature(
+        {
+            "pretrain": pretrain,
+            "downstream": downstream,
+            "inputs": inputs,
+            "pretrain_implementation": implementation_hash(Path("scripts/train_pretrain.py")),
+            "downstream_implementation": implementation_hash(Path("scripts/train_downstream.py")),
+        }
+    )[:16]
+    root = Path(pretrain["output_dir"]).parent / "runs" / fingerprint
+    pretrain["output_dir"] = str(root / "pretrain")
+    downstream.update(
+        output_dir=str(root / "downstream"), ssl_checkpoint=str(root / "pretrain" / "best.pt")
+    )
+    return pretrain, downstream, root, full_pretrain["manifest"]
 
 
 def main() -> None:
@@ -33,6 +85,50 @@ def main() -> None:
     )
     args = parser.parse_args()
     matrix = load_config(args.config)
+    if args.stage == "prepare":
+        subprocess.run(
+            [sys.executable, "scripts/prepare_data.py", "--config", matrix["data_config"]],
+            check=True,
+        )
+    elif args.stage == "smoke":
+        pretrain, downstream, smoke_root, source_manifest = smoke_settings(matrix)
+        for name, config in (("pretrain", pretrain), ("downstream", downstream)):
+            path = smoke_root / f"{name}.json"
+            if path.exists() and load_config(path) != config:
+                raise ValueError(f"Smoke configuration artifact changed: {path}")
+            if not path.exists():
+                save_json(path, config)
+        for command in (
+            [sys.executable, "-m", "pytest", "-q"],
+            [sys.executable, "scripts/prepare_smoke_manifest.py", "--source", source_manifest],
+            [
+                sys.executable,
+                "scripts/train_pretrain.py",
+                "--config",
+                str(smoke_root / "pretrain.json"),
+            ],
+            [
+                sys.executable,
+                "scripts/prepare_downstream_smoke.py",
+                "--config",
+                matrix["downstream_templates"]["ssl_linear"],
+            ],
+            [
+                sys.executable,
+                "scripts/train_downstream.py",
+                "--config",
+                str(smoke_root / "downstream.json"),
+            ],
+        ):
+            subprocess.run(command, check=True)
+        print(f"Inspect {pretrain['output_dir']}/augmentation_pairs.png before full pretraining.")
+    elif args.stage == "aggregate":
+        subprocess.run(
+            [sys.executable, "scripts/aggregate_results.py", "--partition", "final_validation"],
+            check=True,
+        )
+    if args.stage in {"prepare", "smoke", "aggregate"}:
+        return
     plan = build_plan(matrix)
     available = set(matrix["pretrain_configs"]) | {"scratch", "imagenet"}
     if args.methods and not set(args.methods).issubset(available):
@@ -50,7 +146,8 @@ def main() -> None:
             path = root / stage / f"{run_id}.json"
             if path.exists() and load_config(path) != config:
                 raise ValueError(f"Generated plan changed; use a new generated_dir: {path}")
-            save_json(path, config)
+            if not path.exists():
+                save_json(path, config)
             script = "evaluate_checkpoint" if stage == "evaluate" else f"train_{stage}"
             commands[stage].append([sys.executable, f"scripts/{script}.py", "--config", str(path)])
     save_json(
@@ -63,42 +160,9 @@ def main() -> None:
     )
     if args.stage == "plan":
         return
-    if args.stage == "prepare":
-        subprocess.run(
-            [sys.executable, "scripts/prepare_data.py", "--config", matrix["data_config"]],
-            check=True,
-        )
-    elif args.stage == "smoke":
-        for command in (
-            [sys.executable, "-m", "pytest", "-q"],
-            [sys.executable, "scripts/prepare_smoke_manifest.py"],
-            [
-                sys.executable,
-                "scripts/train_pretrain.py",
-                "--config",
-                "configs/pretrain/simclr_smoke.yaml",
-            ],
-            [sys.executable, "scripts/prepare_downstream_smoke.py"],
-            [
-                sys.executable,
-                "scripts/train_downstream.py",
-                "--config",
-                "configs/downstream/smoke.yaml",
-            ],
-        ):
-            subprocess.run(command, check=True)
-        print(
-            "Inspect outputs/smoke/simclr-resnet18-gpu-cache/augmentation_pairs.png before full pretraining."
-        )
-    elif args.stage == "aggregate":
-        subprocess.run(
-            [sys.executable, "scripts/aggregate_results.py", "--partition", "final_validation"],
-            check=True,
-        )
-    else:
+    if args.stage in {"pretrain", "downstream", "evaluate"}:
         if args.stage == "pretrain":
-            smoke = load_config(Path("configs/pretrain/simclr_smoke.yaml"))
-            downstream_smoke = load_config(Path("configs/downstream/smoke.yaml"))
+            smoke, downstream_smoke, _, _ = smoke_settings(matrix)
             for setting in (smoke, downstream_smoke):
                 metadata = Path(setting["output_dir"]) / "run_metadata.json"
                 if not metadata.exists() or load_config(metadata).get("status") != "complete":
