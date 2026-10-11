@@ -1,8 +1,0 @@
-extends: defaults.yaml
-method: moco
-output_dir: outputs/pretrain/moco-resnet18-gpu-cache-seed42
-ssl:
-  temperatures:
-    moco: 0.2
-  queue_size: 4096
-  momentum: 0.99

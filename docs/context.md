@@ -1,72 +1,54 @@
-# Self-Supervised Contrastive Learning for Label-Efficient Medical Image Classification
+# CheXpert label-efficiency study: scientific and execution protocol
 
-## 1. Project Context
+## 1. Purpose and scope
 
-This project investigates whether self-supervised contrastive learning (SSL) can reduce the amount of labeled data required for clinically useful chest X-ray classification. The dataset is the bundled CheXpert-v1.0-small release. It contains frontal and lateral chest radiographs with multi-label clinical observations, an official training manifest, and an official validation manifest.
+Compare whether SimCLR, MoCo v2, BYOL, NNCLR, and SwAV representations improve
+multi-label chest X-ray classification when labels are limited. Compare every
+SSL encoder through a frozen linear probe and full fine-tuning, alongside
+supervised-from-scratch and explicitly versioned ImageNet references. Reliability,
+matched patient cohorts and reproducibility take precedence over a single score.
 
-The primary comparison is among five image-only self-supervised learning methods: SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. They share the same ResNet encoder, image pool, and augmentation policy. Each encoder is evaluated with a frozen linear probe and full fine-tuning on fixed labeled-patient budgets, alongside supervised-from-scratch and ImageNet-initialized reference baselines.
+The five targets are Atelectasis, Cardiomegaly, Consolidation, Edema and Pleural
+Effusion. Use the bundled CheXpert-v1.0-small release. Do not claim generalization
+to external populations or clinical diagnostic capability. Teacher–student
+pseudo-labeling, other SSL objectives and clinical deployment are out of scope.
 
-The project should prioritize a reliable, reproducible comparison over maximizing a single validation score.
+## 2. One executable source
 
-## 2. Research Question and Hypotheses
+`chexpert_ssl.ipynb` contains the implementation, an embedded YAML bundle,
+and ordinary sequential execution cells. There are no runtime dependencies on `src/`,
+`scripts/` or external `configs/` trees. The test-only loader reads setup and definitions before the study section
+without executing real-data experiments; no cell tags are required.
+Configuration names such as `configs/experiments/notebook_reference.yaml` are
+keys inside the bundle, not files to create. External YAML/JSON configurations
+remain supported; inheritance is relative to their containing location.
 
-### Primary research question
+The approved consolidation retains the hardened image-only implementation and
+scientific choices. It replaces the original notebook's weaker resume, cache,
+cohort and final-evaluation behavior. Historical seed-42 settings remain an
+explicit separate profile. The reference matrix uses the notebook-reference
+profile described below. Configuration choices are YAML, not training-loop
+constants. Every training/evaluation run saves its resolved configuration and
+provenance using `save_run_metadata`.
 
-How do SimCLR, MoCo v2, BYOL, NNCLR, and SwAV pretraining on unlabeled CheXpert radiographs compare in downstream multi-label classification at limited label budgets?
+## 3. Data handling and uncertainty
 
-### Hypotheses
+Sources:
 
-1. SSL-pretrained encoders will improve over supervised training from scratch at low labeled-data budgets.
-2. Relative performance will differ among the five SSL objectives and may vary with label budget.
-3. Fine-tuning and frozen linear probing provide complementary measures of transfer quality.
-4. Gains will differ by pathology because label prevalence, uncertainty, and image appearance differ across observations.
+- `CheXpert-v1.0-small/train.csv` and `train/`: SSL, downstream training and
+  patient-disjoint development.
+- `CheXpert-v1.0-small/valid.csv` and `valid/`: final held-out evaluation only.
 
-## 3. Scope
+Preparation preserves source paths, patient/study identifiers including leading
+zeros, views, raw labels and resolved binary targets. Missing or unreadable
+images are excluded and logged. Partition patients before filtering views: SSL
+retains all views of training patients, including lateral-only patients;
+downstream/development retain frontal AP/PA records. Network inputs use three
+identical grayscale channels.
 
-### In scope
+`resolve_target` implements the primary policy:
 
-- Multi-label classification of five CheXpert competition observations:
-  - Atelectasis
-  - Cardiomegaly
-  - Consolidation
-  - Edema
-  - Pleural Effusion
-- Five SSL methods (SimCLR, MoCo v2, BYOL, NNCLR, and SwAV) trained on the same training-patient radiographs without labels.
-- Label-efficient downstream experiments at fixed label budgets.
-- Supervised-from-scratch and ImageNet-initialized reference baselines, linear-probe evaluation, and full fine-tuning.
-- Patient-level split controls, reproducible experiment tracking, and clinically cautious error analysis.
-
-### Out of scope for the first version
-
-- Diagnosis or clinical deployment.
-- DINO, masked autoencoders, and additional SSL objectives beyond the five defined above.
-- Training on external datasets or reporting claims of generalization beyond CheXpert.
-- Use of images or labels from the official validation set during model selection.
-
-## 4. Dataset Protocol
-
-### Source files
-
-- `CheXpert-v1.0-small/train.csv`: source of pretraining and downstream-development records.
-- `CheXpert-v1.0-small/valid.csv`: final held-out evaluation manifest.
-- `CheXpert-v1.0-small/train/` and `CheXpert-v1.0-small/valid/`: image roots referenced by the manifests.
-
-### Record preparation
-
-1. Read the CSV manifests with a structured tabular loader.
-2. Convert each manifest path to a local path relative to the dataset root.
-3. Keep the source image path, patient ID, study ID, view, and the five selected labels in a prepared manifest.
-4. Exclude records whose image path is missing or unreadable, and log the count and paths in a data-quality report.
-5. Keep all available image views for pretraining. For downstream experiments, begin with frontal images (`AP` and `PA`) only because they are the most directly comparable; record the filtering count.
-6. Convert grayscale images to three identical channels for the shared three-channel backbone interface.
-
-### Target encoding and uncertainty policy
-
-CheXpert labels can be `1` (positive), `0` (negative), `-1` (uncertain), or blank (no mention). The downstream manifest must store both the raw value and the resolved binary target.
-
-Use the CheXpert U-Zeros/U-Ones convention below for the initial study:
-
-| Observation | Positive | Negative or blank | Uncertain (`-1`) |
+| Label | Positive | Negative / blank | Uncertain (-1) |
 | --- | --- | --- | --- |
 | Atelectasis | 1 | 0 | 1 |
 | Cardiomegaly | 1 | 0 | 0 |
@@ -74,541 +56,236 @@ Use the CheXpert U-Zeros/U-Ones convention below for the initial study:
 | Edema | 1 | 0 | 1 |
 | Pleural Effusion | 1 | 0 | 0 |
 
-This mapping must be implemented in one reusable preprocessing function and recorded in every run configuration. A later sensitivity experiment may compare this choice with uncertainty masking or alternative mappings, but it must not be mixed into the primary result table.
+Alternative uncertainty handling must be declared as a separate sensitivity
+experiment with its own configuration and results.
 
-### Leakage prevention and partitions
+The reference split uses NumPy `RandomState`, seed 1234, with 10% development
+patients. Budget seeds are 0/1/2. A persisted permutation produces nested
+1/5/10/25/100% patient cohorts with ceiling-rounded counts. All methods at the
+same seed/budget reuse the same JSON cohort. Do not resample images or regenerate
+cohorts during a comparison. Iterative multilabel stratification is not
+implemented; train/development prevalence is recorded.
 
-- Extract patient identifiers from the image path or manifest metadata before any sampling.
-- Partition at patient level, never image level. A patient must appear in exactly one of train, development, or final validation.
-- From `train.csv`, make a patient-disjoint development split (target: 10% of patients) for early stopping, threshold selection, and hyperparameter selection. Use iterative multi-label stratification where practical; otherwise document class prevalence before and after splitting.
-- Keep `valid.csv` untouched until a configuration has been selected. It is the final held-out evaluation set.
-- Create and persist sampled patient IDs for every label budget and seed. Larger budgets should be nested within smaller-budget experiments for each seed where practical.
+Legacy patient IDs with lost padding are normalized only when numeric identity
+agrees with source paths. Duplicate aliases, unknown cohort members, genuine ID
+mismatches and partition overlap fail validation. Corrections are recorded;
+existing cohort files are not rewritten. The legacy repair task excludes
+development patients from an older SSL manifest without resampling cohorts.
 
-## 5. Model Design
+Official validation may be read during preparation for manifest creation,
+image-quality checks and disjointness verification. Preparation does not report
+its label prevalence. It must never inform model/prompt selection, calibration
+or hyperparameter tuning. The old notebook's early validation-prevalence output
+has been removed. Full final prediction/metrics require development-selection
+locks.
 
-### Shared encoder
+## 4. Directories and cache
 
-Use ResNet-18 as the default shared encoder for all five SSL methods. ResNet-50
-is an optional higher-compute setting. The architecture and input resolution
-must be identical across methods in a comparison.
+Paths are relative to the repository root, discovered from the notebook or
+explicitly set with `CHEXPERT_PROJECT_ROOT`. The staged API sets and restores the
+working directory for each operation. No automatic download or credential-copy
+step is performed. Use local Jupyter Notebook, JupyterLab or VS Code.
+The first cell sets the kernel working directory to the notebook directory.
+A dependency-install cell uses the active kernel Python if required imports
+are missing. Direct managed training/evaluation calls re-enter
+the project root even if the user subsequently changes the working directory.
 
-### SSL pretraining
-
-- Pretrain only on images from the training partition; do not use downstream labels.
-- Use the method-specific projection/prediction heads and objective for SimCLR, MoCo v2, BYOL, NNCLR, and SwAV. Downstream transfer uses the online encoder only.
-- Share the data partition, GPU-side two-view augmentation policy, optimizer family, batch size, and encoder architecture across methods. Method-specific temperatures, queues, momentum, and prototypes are configuration values.
-- Decode and resize images once into a reusable memory-mapped grayscale uint8
-  cache, then perform batched augmentations on the training device. The full
-  training-image cache at 128 x 128 is about 3.4 GiB.
-- The primary runner now follows `chexpert_ssl_colab.ipynb`: batch size 256,
-  128-pixel input, 30 epochs, AdamW, two warmup epochs, and per-step cosine decay.
-  Base LR is 0.001 times batch size / 256; the cosine minimum multiplier is
-  0.001. CUDA performance settings remain available. Lower batch size identically
-  across all methods if needed, recording this as a reference-protocol deviation.
-- Save resumable per-epoch checkpoints and the exact configuration.
-
-### X-ray-safe augmentation policy
-
-All five SSL methods use two independently augmented views of each image. X-ray transformations must preserve clinically meaningful anatomy.
-
-- Use random resized crops (scale 0.6–1.0, aspect ratio 0.85–1.18), modest rotation/translation, mild brightness/contrast changes, occasional Gaussian blur, and low-amplitude noise.
-- Do not apply hue or saturation changes to grayscale radiographs.
-- Avoid aggressive crops, large rotations, posterization, or cutout transforms that can remove pathology-bearing regions.
-- Treat horizontal flipping as a configurable ablation. The default primary protocol should disable it because laterality can be clinically informative.
-
-The reference profile creates
-`data/processed/notebook-reference/cache/all_training_gray_128.npy` using bounded
-decode batches and reuses it across methods and downstream runs. It saves example
-pairs of GPU-augmented views before full runs; inspect them for anatomical plausibility.
-
-The implementations use two global views for all five methods. SwAV does not use multi-crop in this study. The MoCo implementation uses a momentum encoder and queue in the single-device workflow; results should be reported with this implementation detail rather than described as a distributed multi-GPU run.
-
-### Downstream models
-
-Train matched downstream protocols with identical data splits, input resolution, label mappings, and evaluation code:
-
-1. **Supervised from scratch**: randomly initialized selected backbone plus classification head, trained only on the chosen labeled subset.
-2. **SSL linear probe**: freeze the selected method's pretrained backbone, cache train/development features once, and train only the five-logit classification head.
-3. **SSL fine-tuning**: initialize the selected backbone from its method checkpoint, then optimize the encoder and classification head together on the labeled subset.
-4. **ImageNet reference**: initialize from the configured torchvision ImageNet weights and fine-tune on the same patient cohort. Record it separately from both scratch and CheXpert SSL initialization.
-
-Use `BCEWithLogitsLoss` with per-label positive weighting computed from the labeled training subset. Store the weights in the run metadata. Optimize AUROC-oriented model selection with the development set; do not select checkpoints from the official validation set.
-
-## 6. Experiment Matrix
-
-### Vision-language model extension
-
-Add a VLM track to determine whether image-text pretraining provides useful medical representations beyond the image-only SSL methods. VLM results must be reported separately because the VLM may have learned from external paired image-report data and therefore answers a different transfer-learning question.
-
-Use CheXzero as the primary VLM baseline because it is a CLIP-style model designed for chest X-ray image-text alignment and naturally supports pathology prompts. Pin the exact checkpoint and implementation revision. If CheXzero cannot be used because of an unavailable checkpoint or incompatible license, use one radiology-domain image-text model with equivalent image-embedding and text-embedding interfaces, and identify it as a protocol deviation in the report. Record its name, revision, source, pretraining data description, license, image preprocessing, and any known CheXpert overlap risk before use. Do not silently substitute a general-purpose natural-image CLIP model for the primary VLM result.
-
-The VLM track has three roles:
-
-1. **Zero-shot prompt classification**: score each X-ray against pathology-present and pathology-absent text prompts without fitting a CheXpert classifier. This measures direct language-grounded transfer.
-2. **Frozen VLM feature probe**: freeze the VLM image encoder and train the same five-logit linear head used for image-only SSL. This isolates the quality of its visual representations under the project label budgets.
-3. **VLM fine-tuning**: fine-tune the image encoder and classification head at the same label budgets when the checkpoint license and hardware permit. Use a lower encoder learning rate than the newly initialized head.
-
-The primary image-only question compares the five SSL methods with supervised learning from scratch. The VLM extension answers a secondary question about image-text transfer and must be reported separately.
-
-### Prompt protocol for zero-shot VLM evaluation
-
-- Define prompts before evaluating the official validation set and version them in the repository.
-- Use paired prompts for every label, for example: `"chest radiograph with pleural effusion"` and `"chest radiograph without pleural effusion"`.
-- Use a small, clinically reviewed template set per label rather than selecting a single prompt after observing final-validation results. Templates may vary wording but must preserve the same clinical assertion.
-- Average normalized text embeddings across templates for each positive and negative concept.
-- Convert image-text similarities into a positive-class score using the positive-versus-negative similarity difference or a two-class softmax. Apply the identical score calculation to every pathology.
-- Select prompt templates, optional temperature scaling, and any score-calibration method using only the internal development split. Never tailor prompts to individual final-validation examples.
-- Report both uncalibrated zero-shot AUROC/AUPRC and calibrated threshold metrics. Calibration must not alter rank-based AUROC claims.
-
-### VLM analysis protocol
-
-Use VLMs as an analysis tool, not as a source of generated clinical labels or medical conclusions.
-
-- Compare SSL, supervised, and VLM feature spaces using UMAP or t-SNE only as qualitative visualizations; do not treat visual separation as a performance metric.
-- Produce class-conditioned retrieval panels: for selected validation queries, retrieve nearest training embeddings and inspect whether anatomy, acquisition artifacts, or pathology cues drive similarity. De-identify and keep examples local to the project.
-- Analyze error slices by view position (`AP` versus `PA`), patient age group if available, sex if available, and label prevalence. Omit a slice when its sample size is too small for stable estimates.
-- Use Grad-CAM or an equivalent image-attribution method for the classifier head. Mark every heatmap as a post-hoc explanation, not proof of clinical reasoning or localization.
-- If a text-generation-capable VLM is used for narrative analysis, restrict it to templated, non-diagnostic descriptions of model outputs and require human review. It must not create ground-truth labels, alter metrics, or be presented as a clinical report generator.
-- Maintain an error-analysis worksheet containing run ID, image ID, true labels, predicted probabilities, selected threshold, view, attribution artifact path, and a short reviewer observation.
-
-### Label budgets and seeds
-
-Run each downstream protocol at 1%, 5%, 10%, 25%, and 100% of labeled training patients. Use three fixed seeds for each budget. All methods under a seed/budget pair must receive the exact same persisted sampled patients.
-
-The full image-only matrix produces 180 downstream runs: 12 initialization/protocol arms (five SSL methods each with linear probe and fine-tuning, plus supervised-from-scratch and ImageNet fine-tuning) x 5 budgets x 3 seeds. This matrix is compute-intensive; first validate the pipeline on one method, one budget, and one seed. Each SSL pretraining run is reused across downstream budgets.
-
-### Recommended execution order
-
-1. Verify dataset paths and generate prepared manifests.
-2. Produce patient-disjoint partitions and persist their IDs.
-3. Run unit tests, check all five SSL losses on a small batch, and complete the bounded end-to-end pretraining smoke.
-4. Run a short downstream smoke with one saved patient cohort before launching supervised-from-scratch and ImageNet reference runs.
-5. Inspect the shared augmentation pairs, then start full pretraining only after smoke losses are finite.
-6. Complete full pretraining for all five methods and archive their checkpoints.
-7. Run linear-probe and fine-tuning experiments from smallest to largest label budget.
-8. Validate VLM preprocessing and prompt scoring on the development split; then run the zero-shot and frozen-feature experiments.
-9. Run VLM fine-tuning only after the frozen-feature and zero-shot results are complete and only at the designated budget tiers.
-10. Re-run failed or anomalous jobs only with a recorded reason.
-11. Lock selected configurations, evaluate once on official validation data, and generate the final report.
-
-### Initial hyperparameter defaults
-
-These are starting points, not results to tune against the official validation set.
-
-| Component | Initial configuration |
-| --- | --- |
-| Image size | 128 x 128 default; use the same size across methods |
-| SSL encoder | ResNet-18 default; ResNet-50 optional |
-| SSL epochs | 30 initial compute-conscious default |
-| SSL temperature | 0.1 to 0.2, selected on development protocol |
-| SSL batch size | 256 reference default; decrease consistently if needed |
-| Downstream epochs | Fine-tuning: 30/30/25/20/10 by budget; probe: up to 100 |
-| Fine-tuning optimizer | AdamW with discriminative or lower encoder learning rate |
-| Linear-probe optimizer | AdamW |
-| Precision | Automatic mixed precision |
-| Random seeds | Three fixed values saved in configuration |
-
-## 7. Metrics and Statistical Reporting
-
-### Primary metric
-
-Macro AUROC across the five observations on the official validation set. This gives every pathology equal influence despite class imbalance.
-
-### Secondary metrics
-
-- AUROC for each observation.
-- Macro and per-observation AUPRC.
-- Sensitivity, specificity, F1, and balanced accuracy at thresholds selected only on the development set.
-- Mean and standard deviation across seeds.
-- Patient-level bootstrap 95% confidence intervals for final AUROC and for prespecified SSL-versus-baseline differences.
-- Training time, peak GPU memory where available, epochs completed, and checkpoint size.
-- Zero-shot VLM metrics with the frozen prompt-set version and calibration status clearly identified.
-- Pairwise label-efficiency deltas at each budget: each SSL fine-tuning method versus supervised-from-scratch and ImageNet initialization; compare a VLM frozen probe with the strongest image-only probe selected on development data.
-- Slice-level performance with sample counts and confidence intervals where sufficiently powered; do not make subgroup claims from sparse slices.
-
-### Result presentation
-
-- Table: mean +/- standard deviation by method and label budget.
-- Plot: macro AUROC versus label fraction, with one curve per method and uncertainty bands.
-- Plot: per-pathology AUROC at 1%, 10%, and 100% label budgets.
-- Table: final validation metrics and confidence intervals for the selected settings.
-- Table: zero-shot, frozen-probe, and fine-tuned results, including a `pretraining modality` column (`none`, `image-only SSL`, `image-text VLM`) to prevent misleading direct claims.
-- Qualitative review: selected false positives and false negatives, retrieval examples, and attributions, explicitly framed as model behavior analysis rather than clinical advice.
-
-## 8. Reproducibility and Artifact Layout
-
-Use configuration files rather than hard-coded experiment values. Every run must record:
-
-- Dataset root and a hash or version identifier for prepared manifests.
-- Label set, uncertainty mapping, image-view filter, split IDs, label budget, and seed.
-- Augmentation parameters, architecture, optimizer, schedule, loss settings, batch size, precision, and software versions.
-- Git commit hash, command line, start/end timestamps, hardware, and checkpoint path.
-- For every VLM run: checkpoint identifier and revision, model-card URL/source, license review result, image processor version, prompt-set version, embedding normalization, scoring method, calibration method, and trainable modules.
-
-Recommended generated artifact layout:
+Reference artifacts:
 
 ```text
-data/processed/
-  manifests/
-  splits/
-configs/
-  pretrain/
-  downstream/
-  vlm/
-  prompts/
-outputs/
-  pretrain/<run-id>/
-  downstream/<run-id>/
-  vlm/<run-id>/
-  analysis/<run-id>/
-  reports/
+data/processed/notebook-reference/
+  manifests/  all_training.csv, pretrain_train_leakage_free.csv,
+              downstream_train.csv, development.csv, final_validation.csv
+  splits/     patient partitions and budget_<fraction>_seed_<seed>.json
+  cache/      all_training_gray_128.npy plus cache signature
+  smoke/      bounded, versioned smoke inputs
+outputs/notebook-consolidated/
+  pretrain/ downstream/ evaluation/ smoke/ reports/
+outputs/plans/notebook-consolidated/
 ```
 
-Generated images, checkpoints, cached manifests, and raw experiment outputs should be excluded from version control unless deliberately curated as small examples. Commit code, configurations, split definitions, summaries, and documentation.
+The `pretrain_train.csv` compatibility alias is retained for prepared-data
+compatibility. Existing data/results/plans are not deleted by consolidation.
 
-## 9. Validation and Tests
+Cache grayscale uint8 images with PIL bilinear resizing and a manifest/resolution
+signature; decode in bounded threaded batches. SSL indexes training patients
+only, even though the shared training cache also contains development images
+for downstream evaluation. Development images do not enter SSL learning.
 
-Before expensive training, implement and run the following checks:
+Notebook data loaders require `num_workers: 0`: definitions in Jupyter's kernel
+are not portable importable worker modules. Threaded decoding and batched
+device-side augmentation remain available. This operational change may affect
+throughput and does not promise equivalence to prior GPU trajectories.
 
-1. Manifest parsing correctly resolves every sampled local image path.
-2. Target conversion matches the uncertainty table for synthetic rows containing `1`, `0`, `-1`, and blanks.
-3. No patient appears in more than one partition, label-budget subset, or final-validation overlap.
-4. The two-view dataset returns distinct, finite tensors of the expected shape for each SSL method; inspect representative pairs for anatomical plausibility.
-5. The model returns five logits per image and the loss remains finite for an imbalanced mini-batch.
-6. A checkpoint reload produces the same evaluation outputs for fixed inputs.
-7. AUROC and AUPRC functions match known values on small synthetic examples and handle labels with a single class gracefully.
-8. A short end-to-end run writes metrics, configuration, split ID, checkpoint, and augmentation samples to the expected run directory.
-9. The VLM processor accepts the same sampled image records, emits finite embeddings of stable dimension, and preserves record order.
-10. Prompt scoring returns one score per image and pathology, handles template aggregation deterministically, and does not use labels at inference time.
-11. Frozen VLM features cannot receive gradients during a linear-probe run; selected modules receive gradients during the fine-tuning configuration.
-12. Retrieval and attribution analysis artifacts retain only approved metadata and map back to the exact evaluated checkpoint and run ID.
+## 5. Encoders, augmentations and pretraining
 
-## 10. Milestones and Acceptance Criteria
+The primary shared encoder is ResNet-18 at 128 pixels; ResNet-50 remains an
+optional separate comparison with independent output/plan paths. Additional
+encoder interfaces retained in the implementation are not part of the primary
+matched study. Compare all five methods with identical backbone, image pool,
+resolution, augmentation and shared optimizer settings.
 
-### Milestone 1: Data foundation
+Reference defaults:
 
-Prepared manifests, data-quality report, uncertainty mapping, and persisted patient-level splits exist. All data tests pass.
+- 30 epochs, batch size 256, AdamW weight decay 0.0001.
+- Base LR `0.001 * batch_size / 256`, two warmup epochs, per-step cosine decay
+  with minimum multiplier 0.001.
+- Projection/prediction hidden width 1024, embedding dimension 128.
+- Grayscale normalization mean 0.449, standard deviation 0.226.
+- Conservative two-view crop scale 0.6–1.0, ratio 0.85–1.18; rotation 10 degrees,
+  translation 0.05, brightness 0.1, contrast 0.2; occasional blur and mild noise.
+  Horizontal flip is disabled. Inspect saved augmentation pairs before full runs.
+- AMP, channels-last layout, TF32, cuDNN benchmarking and fused AdamW are
+  configurable CUDA performance options, not guarantees of bitwise determinism.
 
-### Milestone 2: Baselines
+SimCLR uses NT-Xent; MoCo v2 uses a momentum encoder, queue and four-way split
+BatchNorm; BYOL updates the EMA target momentum per step; NNCLR uses detached
+nearest-neighbor positives as InfoNCE anchors; SwAV uses two global views with
+log-space Sinkhorn assignments and freezes prototypes for the first epoch.
+SwAV multi-crop and distributed multi-GPU training are not implemented.
 
-The supervised-from-scratch and ImageNet-initialized 100% runs complete, produce development metrics, and can be evaluated reproducibly from their checkpoints.
+Monitor feature spread each epoch for collapse. Nonfinite losses fail promptly.
+`best.pt` minimizes SSL training loss; reference transfer uses the final online
+encoder from `last.pt`. Pretraining seed 0 is reused across downstream seeds;
+downstream variability does not estimate pretraining-seed variability.
 
-### Milestone 3: SSL representation
+## 6. Downstream matrix
 
-All five SSL objectives pass the small-batch smoke tests. The bounded end-to-end pretraining run completes with inspected augmentations, finite loss, a saved checkpoint, and run metadata.
+Five SSL methods × two transfer protocols, plus scratch and ImageNet, yield
+12 arms × five patient budgets × three seeds = 180 downstream runs. Within
+ascending budget and seed, run scratch, ImageNet, all probes, then all fine-tunes.
+A subset may be selected explicitly using stage filters.
 
-### Milestone 4: Label-efficiency study
+- Probes freeze/evaluate the encoder, standardize features with training-only
+  mean and sample standard deviation (floor 1e-6), and save statistics in the
+  head. Batch size 512, head LR 0.001, maximum 100 epochs, patience 10.
+- Other arms use batch size 64, patience 7, and budget-specific epoch caps
+  30/30/25/20/10. Head LR 0.001; pretrained encoder LR 0.0001, scratch 0.001.
+  Fine-tuning uses cosine decay.
+- Downstream device augmentation: crop scale 0.8–1.0, ratio 0.9–1.1, rotation
+  5 degrees, translation 0.03, brightness/contrast 0.1; no blur, noise or flip.
+- BCE positive weights come only from the selected training subset, clipped
+  to [1, 50]. Development macro AUROC selects checkpoints; development Youden
+  thresholds are embedded in the selected checkpoint.
+- ImageNet weights are explicitly versioned and reported as a separate
+  initialization, not CheXpert image-only SSL.
 
-All methods complete for all five budgets and three seeds, or every missing run has a documented operational reason. Results are aggregated from raw metric files, not manually copied.
+## 7. Checkpoints, provenance and evaluation
 
-### Milestone 5: VLM comparison and analysis
+Training uses atomic full-precision best/last checkpoints containing model,
+optimizer, scheduler/scaler where applicable, training signature and RNG state.
+OS-backed locks reject concurrent writers to a run. Failure/interruption status
+is recorded. Resume validates resolved settings, input hashes and saved notebook
+implementation hashes. CPU tests check interrupted versus uninterrupted weights.
 
-The zero-shot prompt baseline and frozen VLM probes complete with versioned prompts and model provenance. Fine-tuned VLM results complete for the designated budgets if feasible. Retrieval, attribution, and error-slice analyses are tied to frozen result artifacts.
+All saved executable cells contribute to the implementation digest; notebook
+outputs, markdown and the YAML configuration cell do not. Resolved settings enter the run
+signature independently. Save code edits, restart and rerun definitions before
+training. Editing saved implementation while a kernel is loaded is rejected by
+the digest check. Unsaved editor changes must not be treated as recorded code.
+Use new output/plan directories when code or experimental settings change.
+The consolidated reference profile starts under fresh
+`outputs/notebook-consolidated/` and `outputs/plans/notebook-consolidated/` roots,
+reusing the existing reference data and cohorts. Old output directories remain
+intact. Old package and original standalone-notebook checkpoints are not automatic resume points.
+Compatible encoder state dictionaries may be transfer inputs after validation.
 
-### Milestone 6: Final analysis
+`lock_run` records the development-only selection reason and binds the
+checkpoint, training signature, development metrics and thresholds by hashes.
+Locked training runs are immutable. No automatic winner selection occurs.
+Evaluation verifies every requested lock before opening held-out records,
+derives preprocessing and architecture from the checkpoint, rejects conflicting
+overrides, checks patient disjointness and records lineage. Evaluation never
+downloads initialization weights or fits thresholds. Existing completed final
+results are reused only after validation; direct repeat evaluation is rejected.
 
-The final report includes the primary AUROC comparison, secondary metrics, confidence intervals, learning curves, limitations, and reproducibility instructions.
+Report macro and per-label AUROC/AUPRC, sensitivity, specificity, F1 and balanced
+accuracy at development thresholds. Final evaluation exports predictions, patient
+IDs, AP/PA and available age/sex, plus patient-bootstrap macro and per-label
+AUROC confidence intervals. Small held-out sample sizes can produce wide intervals.
 
-## 11. Risks and Mitigations
+Aggregation reads metric artifacts, separates development/final-validation
+partitions, excludes smoke/archive results and rejects duplicate paired
+seed/method/budget records. Export raw metrics, mean/std/count summaries,
+label-efficiency tables and plots. Never manually transcribe study scores.
+Paired-difference bootstrap and probability calibration remain future work.
 
-| Risk | Mitigation |
-| --- | --- |
-| Patient leakage inflates metrics | Persist and test patient-level splits before any model run. |
-| Uncertain labels alter conclusions | Use one declared primary mapping and report a separate sensitivity analysis only if time permits. |
-| Class imbalance hides poor minority-label performance | Report both AUROC and AUPRC per label; use weighted loss. |
-| SSL augmentations corrupt clinical features | Save and inspect paired views; keep transforms conservative. |
-| SSL batch does not fit GPU memory | Use mixed precision and lower the configured batch size; record the setting because it affects method comparison. |
-| Repeated validation-set tuning overfits results | Use the internal development split for all selection and evaluate the official validation manifest only after configurations are locked. |
-| Small low-budget subsets are unstable | Use fixed multi-seed patient samples and report variance, not just the best run. |
-| VLM pretrained on data overlapping CheXpert | Review the model card and pretraining documentation; disclose known or unresolved overlap and label results as transfer benchmarks, not independent generalization. |
-| Prompt wording changes zero-shot score | Pre-register a small versioned template set and tune only on the internal development split. |
-| VLM is too expensive to fine-tune | Complete zero-shot and frozen-feature probes first; use parameter-efficient fine-tuning only if it is clearly reported as such. |
-| Interpretability artifacts are over-read | Present retrievals and attributions as qualitative evidence of model behavior, never as clinical validation. |
+## 8. Verification and execution gates
 
-## 12. Final Deliverables
+The sequence is prepare → tests/bounded smoke → human augmentation review →
+pretrain → downstream → development report → selection locks → final evaluation
+→ final report. Run All executes each study stage directly, including the declared full
+downstream matrix. Human input is requested after displaying augmentation pairs
+and before locking configurations based on development results. Matching saved
+reviews and verified selection locks are reused. There are no cell tags or
+per-stage enable switches.
 
-1. A documented, configuration-driven training pipeline.
-2. Patient-level manifests and reproducible split files.
-3. Supervised, SSL linear-probe, and SSL fine-tuned checkpoints and metric logs for all five objectives.
-4. Versioned VLM prompt sets, zero-shot scores, frozen-feature probes, and optional VLM fine-tuning artifacts.
-5. Aggregated tables and plots for the image-only and image-text label-efficiency comparisons.
-6. A final technical report that states the question, methods, results, VLM provenance, limitations, and conditions needed to reproduce the study.
+`run_stage("smoke")` runs pytest, all five SSL objectives for two epochs with at
+most four steps/epoch at batch size 64, and scratch/SimCLR probe/MoCo fine-tune/
+ImageNet downstream paths from bounded saved cohorts. ImageNet smoke requires
+its pinned weights. Smoke data/results are versioned by inputs, implementation
+and settings. Pretraining requires a matching test-completion record, completed
+smoke metadata and an explicitly reviewed augmentation image hash.
 
-## 13. Implementation Status (2026-10-05)
+Regression tests load definition cells only and cover targets, identifiers,
+cohorts, losses, both ResNet interfaces, numerical stability, checkpoint transfer,
+CPU interruption/resume, locks, evaluation and aggregation. Run notebook schema,
+lint/format and Run All sequencing checks as part of consolidation verification.
+Synthetic CPU results are engineering checks, not CheXpert performance evidence.
+The full reference GPU smoke and human image review must run on the intended
+training environment before expensive jobs. Failed/anomalous reruns need a
+recorded operational reason.
 
-The repository contains the configured data and training pipeline. The image-only
-training pipeline has not yet been run end to end in this workspace; the local
-pytest attempt could not collect tests because PyTorch, NumPy, and pandas are not
-installed here. No performance claim, checkpoint, split artifact, or
-final-validation result is implied by code presence alone.
+## 9. Optional image-text VLM extension
 
-### Implemented data and reproducibility foundation
+VLM adapters and development tasks are retained as disabled, experimental
+scaffolding. Install `.[vlm]`. Require an explicitly reviewed radiology-domain
+checkpoint, immutable 40-character revision, HTTPS model-card source, license
+review, overlap review and `pretraining_modality: image-text VLM`. Placeholder
+configs fail before any weight download; no general-purpose CLIP fallback.
+CheXzero is the intended baseline, subject to adapter compatibility and review.
 
-- `scripts/prepare_data.py` prepares portable manifests, resolves the declared
-  U-Ones/U-Zeros targets, verifies that images exist and can be decoded, and
-  emits missing/unreadable-image reports.
-- It creates a deterministic patient-level train/development split, writes the
-  patient IDs for train, development, and official validation, and records
-  target prevalence plus content hashes for every generated manifest.
-- It also writes nested patient-ID JSON cohorts for label fractions `0.01`,
-  `0.05`, `0.10`, `0.25`, and `1.0`, using seeds `42`, `43`, and `44`. The
-  current patient split is deterministic shuffled assignment rather than
-  iterative multi-label stratification; prevalence reporting documents the
-  resulting distribution.
-- For previously prepared data, `scripts/repair_pretrain_manifest.py` creates a
-  separate development-patient-free pretraining manifest from the existing
-  pretraining and development CSVs. It does not open images or modify cohort
-  files; pretraining configs point to this repaired manifest.
-- Each training/evaluation output receives `run_metadata.json` with the full
-  configuration, command, Git revision, Python/PyTorch versions, CUDA status,
-  hardware identifier, and timestamp.
+Prompts are versioned positive/negative templates per pathology. Average
+normalized template embeddings and use a two-class similarity softmax. Select
+prompts/calibration on development only. Probes/fine-tuning must use the same
+persisted patient cohorts and target mapping as image-only arms. Frozen VLM
+encoders stay in evaluation mode. These tasks reject held-out manifests and
+existing run directories; full image-only resume/selection-lock behavior has
+not been extended to VLM final evaluation.
 
-### Implemented image-only experiments
+Error worksheets retain run/image/patient/study identifiers, target, probability,
+threshold, view and reviewer observations. Retrieval, UMAP/t-SNE, attribution,
+paired bootstrap and narrative VLM analysis are future work. They must not create
+ground-truth labels, supply diagnoses or imply clinical validity.
 
-- `scripts/train_pretrain.py` supports SimCLR, MoCo v2, BYOL, NNCLR, and SwAV
-  using the shared ResNet-18/ResNet-50 encoder interface. Each method writes
-  augmentation examples and resumable `best.pt`/`last.pt` checkpoints that
-  include transferable online-encoder weights.
-- `scripts/prepare_smoke_manifest.py` creates a bounded unlabeled manifest for
-  an end-to-end SimCLR pipeline smoke check. `tests/test_ssl_methods.py` checks
-  finite loss, encoder gradients, and update hooks for all five objectives.
-- `scripts/train_downstream.py` supports supervised training, SSL frozen linear
-  probes, and SSL fine-tuning. Linear probes extract frozen train/development
-  features once before fitting the five-label head. Runs accept persisted
-  sampled-patient JSON files, use subset-specific positive weights, select
-  checkpoints by development macro AUROC, and save development-selected thresholds.
-- `scripts/evaluate_checkpoint.py` is the explicit locked-configuration path
-  for the official validation manifest. It writes metrics, per-image
-  probabilities, threshold metrics, and a patient-resampled macro-AUROC CI.
-  It must not be used before configuration selection is complete.
+## 10. Local Jupyter simplification
 
-### Implemented VLM extension
+The executable is now named `chexpert_ssl.ipynb`; cloud-drive setup and
+cloud-specific instructions are removed. Project root is the directory containing
+this notebook. Root setup uses only the Python standard library and runs before
+conditional dependency installation and third-party imports. Experiment settings,
+cohort paths and artifact locations are unchanged.
 
-- The optional `vlm` dependency group supplies a Hugging Face adapter for
-  CLIP-compatible radiology checkpoints. All supplied VLM configs intentionally
-  contain required checkpoint, revision, and model-card placeholders.
-- `configs/prompts/chexpert_v1.yaml` versions paired positive/negative templates
-  for all five observations. `scripts/evaluate_vlm_zeroshot.py` averages
-  normalized template embeddings and uses a two-class image-text softmax score
-  without labels at inference.
-- `scripts/train_vlm.py` supports frozen feature probes and image-encoder
-  fine-tuning. Fine-tuning uses a separately configurable, lower encoder
-  learning rate. VLM configs record the `image-text VLM` modality and require
-  license review before use.
+SimCLR and the public loss tests now use one `nt_xent_loss` implementation, with
+the same float32 normalization and objective. The unused ad-hoc patient-budget
+sampler is removed; selection uses persisted cohorts. Redundant loss and generic
+boilerplate blocks are removed. Historical profiles and optional reviewed VLM
+functions remain because they serve distinct purposes.
 
-### Implemented reporting and analysis support
+## 11. Sequential Run All execution
 
-- `scripts/aggregate_results.py` produces raw-metric and seed-summary CSVs from
-  run artifacts, retaining method and pretraining-modality columns.
-- `scripts/analyze_errors.py` creates an editable false-positive/false-negative
-  worksheet containing the run, image/patient/study IDs, label, prediction,
-  threshold, view, attribution placeholder, and reviewer-observation field.
+The user requested an ordinary executable notebook. All library/workflow tags
+and `RUN_*` switches are removed. Setup installs missing dependencies, and the
+study cells call preparation/reuse, smoke, pretraining, the complete configured
+downstream matrix, development reporting, selection, final evaluation and final
+reporting in order. Existing preparation is checked against the requested split
+settings, required manifests, patient disjointness and every persisted cohort.
+It is reused without rewriting cohorts.
 
-### Five-method comparison
-
-- Separate YAML configs define the shared default ResNet-18 pretraining setup
-  for each SSL method. ResNet-50 remains an optional higher-compute comparison.
-- Pretraining now shares a disk-backed 128 x 128 grayscale cache and GPU-side
-  two-view augmentation. CUDA runs use pinned/prefetched batches, channels-last
-  layout, autocast, TF32, cuDNN benchmarking, and fused AdamW; progress logs
-  report throughput and GPU memory. These settings improve input utilization,
-  but actual throughput must be measured on the target pod.
-- The online encoder checkpoint from each method can be reused for every
-  downstream label budget and seed.
-- The single-device PyTorch objectives are SimCLR/NT-Xent, MoCo/momentum
-  encoder and queue, BYOL/EMA target, NNCLR/nearest-neighbor support queue, and
-  SwAV/prototype assignment with Sinkhorn normalization over two global views.
-- Pretraining manifests now contain every available view for training patients
-  only, keeping development patients out of SSL representation learning.
-- Downstream comparisons must point each method to the same persisted patient
-  cohort for each budget/seed pair. Do not use the official validation partition
-  for selection.
-
-### Deferred implementation and operational requirements
-
-- Gradient accumulation, warmup, LARS, iterative multilabel stratification,
-  pretraining peak-memory logging, final paired-difference bootstrap,
-  calibration, report plots, retrieval, UMAP/t-SNE, and Grad-CAM are not
-  implemented yet.
-- Unit tests cover uncertainty conversion, patient overlap, patient budgets,
-  NT-Xent, basic multilabel metrics, and forward/backward checks for all five
-  SSL objectives. Run the full suite and an end-to-end GPU smoke test in the
-  training environment before long jobs.
-- Before expensive runs, inspect `augmentation_pairs.png`, review VLM
-  provenance/license/overlap risk, and lock configurations on development data
-  before final evaluation.
-
-## 14. Image-only pipeline hardening (2026-10-10)
-
-The five primary objectives remain SimCLR, MoCo v2, BYOL, NNCLR, and SwAV.
-They inherit one shared YAML protocol, with ResNet-18/128 as the default and
-ResNet-50 available as a separate comparison. `configs/experiments/label_efficiency.yaml`
-defines five reusable pretraining runs and the 180 downstream runs specified in
-Section 6. The three downstream seeds reuse the seed-42 pretrained encoder for
-each method; reported downstream seed variance does not represent pretraining
-seed variance. Plan generation validates shared settings and does not launch
-training or final evaluation.
-
-### Data and cohort corrections
-
-- Prepared CSVs preserve string patient/study IDs, including leading zeros.
-  Training requires persisted cohort JSON and verifies its seed, fraction,
-  patient count, unique IDs, and membership. Train/development overlap and
-  official-validation paths are rejected before training.
-- Fresh preparation partitions all training patients before downstream view
-  filtering, retaining lateral-only training patients in the SSL pool. It writes
-  the canonical `pretrain_train_leakage_free.csv` and the compatibility alias
-  `pretrain_train.csv`. Existing cohorts are reused; regeneration requires an
-  explicit overwrite and constitutes a new prepared study.
-- Historical cohorts are not rewritten. The repair helper remains available for
-  older pretraining manifests. Small downstream smoke artifacts are derived from
-  an existing saved cohort and remain separate from primary experiments.
-- For legacy manifests with stripped leading zeros, the loader restores the
-  source-path patient-ID spelling only after verifying numeric identity. Saved
-  cohorts resolve equivalent padded/unpadded IDs without changing membership or
-  file contents; duplicate aliases, unknown patients, and genuinely conflicting
-  IDs are rejected. Disjointness checks compare identities rather than padding,
-  and training metadata records normalization counts.
-
-### Configuration, checkpoints, and final evaluation
-
-- YAML inheritance resolves shared backbone, optimizer, augmentation, precision,
-  and primary uncertainty policy settings. Runs save `resolved_config.json` and
-  full metadata including input hashes, subset-specific positive weights,
-  software versions, start/end times, completion status, and resource summaries.
-  An implementation digest binds the entry point and package source files,
-  including uncommitted edits, into the resume signature and job-reuse checks.
-- All five methods write atomic resumable checkpoints containing the online
-  encoder, optimizer/scheduler/scaler state, training signature, and RNG state.
-  Downstream checkpoints receive the same compatibility checks and restore
-  epoch-boundary RNG state. Explicit epoch sampling seeds separate worker and
-  shuffle RNG streams. CPU interruption tests check equality after resume;
-  throughput-oriented CUDA defaults do not imply bitwise reproducibility.
-- SwAV Sinkhorn assignments use float32 log-space normalization to avoid
-  exponential overflow under mixed precision; this preserves the two-global-view
-  objective and does not introduce a new SSL method.
-- Frozen image-only probes keep the encoder in evaluation mode and fit only the
-  classification head. All downstream checkpoint selection and threshold
-  fitting use development records. Best checkpoints embed their thresholds.
-- `scripts/lock_selection.py` records a development-only selection decision and
-  binds the checkpoint, thresholds, configuration signature, and development
-  metric artifact. Locking does not inspect official-validation data. Selected
-  training runs are immutable.
-- Final evaluation requires a matching lock and thresholds, derives model and
-  preprocessing settings from the selected checkpoint, checks patient
-  disjointness, and writes training-run lineage into its artifacts. The runner
-  verifies every requested lock before reading official-validation records.
-  It reuses completed evaluation artifacts rather than silently reevaluating.
-- Aggregation explicitly separates `development` and `final_validation`, retains
-  initialization/protocol/budget/seed identity, and rejects duplicate paired
-  results. It scans evaluation artifacts even when they are beneath reports.
-  Final predictions retain AP/PA, age, and sex where available for later analyses.
-
-### Operational sequence and remaining scope
-
-Use the README's staged `prepare -> smoke -> pretrain -> downstream -> lock ->
-evaluate -> aggregate` workflow. Before full pretraining, the runner requires
-completed test/smoke artifacts and an explicit anatomical augmentation review.
-Generated plans are immutable, failed jobs stop the sequence, and concurrent
-writes to an individual run are rejected.
-Numeric YAML/JSON settings are normalized before comparing plans or computing
-resume signatures, so scientific-notation strings and equivalent numbers do not
-create false configuration changes. Preparation, smoke, and aggregation do not
-materialize or require the full experiment plan.
-Runner smoke outputs are versioned by their resolved settings, source-input
-hashes, and training implementation. Compatible bounded jobs resume in place;
-changed versions use separate directories without replacing older checkpoints.
-The full-pretraining gate checks the matching version and its augmentation
-preview rather than an unrelated historical smoke run.
-
-The experiment matrix generates final-evaluation configurations directly; an
-independent placeholder evaluation YAML is unnecessary. Smoke YAMLs inherit
-shared settings rather than duplicating them. Generated package metadata,
-build products, and tool caches are excluded from version control. Cleanup may
-remove superseded smoke artifacts after a matching version completes, but keeps
-the matching smoke, primary checkpoints/metrics/plans, and persisted cohorts.
-It does not change resolved experiment settings or the scientific protocol.
-
-This update hardens the image-only lifecycle. VLM checkpoint review, adapter
-compatibility, VLM lifecycle hardening, calibration, paired-difference bootstrap,
-report plots, retrieval, dimensionality reduction, and attribution remain
-separate work. Pretraining peak-memory logging is implemented, superseding the
-older deferred-status statement in Section 13. Synthetic CPU tests exercise
-small pretraining and downstream jobs; they do not establish CheXpert performance
-or substitute for the documented GPU smoke and human augmentation review.
-
-## 15. Notebook-reference alignment (2026-10-10)
-
-`chexpert_ssl_colab.ipynb` is the implementation reference. The default matrix
-runner uses `configs/experiments/notebook_reference.yaml`; earlier method YAMLs
-and `label_efficiency.yaml` retain the historical seed-42 protocol. Reference
-artifacts are isolated under `data/processed/notebook-reference/` and
-`outputs/notebook-reference/`, including a separate generated plan. Existing
-cohorts and checkpoints are preserved and are not compatible resume points for
-the changed protocol. Sections 13 and 14 describe historical implementations;
-the settings below supersede their default-training and deferred-reporting notes.
-
-Reference scientific choices:
-
-- ResNet-18 at 128 pixels; identical encoder settings across five methods.
-  Projection/prediction hidden width 1024 and projection dimension 128.
-- Patient split uses NumPy `RandomState` seed 1234 and 10% development patients.
-  Downstream seeds are 0, 1, 2; cohorts use a saved permutation and ceiling-rounded
-  patient counts. Budget cohorts remain nested and shared across methods.
-- Grayscale uint8 images are cached with PIL bilinear resizing. The full training
-  cache includes development pixels, but SSL indexes only training patients and
-  never learns from development images or labels. Downstream uses this same
-  cache. Network inputs use grayscale mean 0.449 and standard deviation 0.226.
-- SSL batch size 256, 30 epochs, AdamW with weight decay 0.0001. LR is 0.001
-  scaled by batch size / 256, two warmup epochs, and per-step cosine decay to a
-  0.001 multiplier. Epoch batch orders follow the notebook's sampling rules.
-- MoCo uses four-way split BatchNorm. NNCLR's detached nearest-neighbor positives
-  are the InfoNCE anchors, matching the notebook's loss direction. SwAV freezes
-  prototypes for the first epoch; BYOL updates its momentum at step-level progress.
-  Feature-spread monitoring is saved each epoch. Downstream transfer uses the
-  final online encoder from `last.pt`, matching the notebook's `encoder.pt`.
-- Linear probes standardize features with training-only mean and sample standard
-  deviation, floored at 1e-6. Batch size 512, head LR 0.001, up to 100 epochs,
-  patience 10. Statistics are saved in the head rather than folded into weights;
-  this gives the same mathematical prediction and supports strict resume checks.
-- Other downstream arms use batch size 64, patience 7, head LR 0.001, and
-  cosine decay. Encoder LR is 0.001 for scratch and 0.0001 for pretrained models.
-  Epoch limits for 1/5/10/25/100% budgets are 30/30/25/20/10.
-- Downstream GPU augmentation uses crop scale 0.8–1.0, ratio 0.9–1.1,
-  rotation 5 degrees, translation 0.03, brightness/contrast 0.1, and no blur,
-  noise, or horizontal flip. Positive-only BCE weights are clipped to [1, 50].
-  Development thresholds use the notebook's Youden rule and tie ordering.
-- Final evaluation saves patient-bootstrap macro and per-label AUROC intervals.
-  Raw-metric aggregation writes mean/std/count tables and a label-efficiency plot.
-  Within each ascending budget and seed, execution follows the notebook: scratch,
-  ImageNet, all five probes, then all five fine-tuning runs.
-
-Intentional operational differences from the notebook:
-
-- Bounded smoke uses separate manifests: all five methods run two epochs of at
-  most four steps at batch size 64; downstream checks scratch, SimCLR probing,
-  MoCo fine-tuning, and ImageNet from a bounded saved 5% patient cohort.
-  Tests directly compare notebook model losses/gradients, augmentation, LR,
-  cohort membership, and threshold selection, and exercise reference-profile
-  CPU transfer/evaluation and interruption/resume. They do not establish GPU
-  throughput, bitwise CUDA equivalence, or clinical performance.
-- The repository retains atomic full-precision best/last checkpoints, RNG state,
-  input/implementation hashes, OS locks, and development-selection locks. It
-  does not delete resume checkpoints after completion, silently overwrite smoke
-  outputs, or accept a completed run merely because a metric file exists.
-- Nonfinite training losses fail immediately; SwAV assignments use equivalent
-  log-space Sinkhorn normalization for numerical stability. CUDA throughput
-  optimizations and separate worker RNG streams can change numerical trajectories.
-- Official-validation records may be prepared and checked for disjointness, but
-  model selection and calibration never use them. The notebook actually reads
-  and prints their prevalence before its final flag; this is not copied as a
-  selection workflow. Final model evaluation requires explicit saved selection
-  locks rather than a mutable notebook confirmation variable.
-- Teacher/student pseudo-labeling and CheXzero are future extensions in the
-  notebook, not prerequisites for its image-only study. Existing VLM scaffolding
-  remains optional and requires its own provenance and license review.
-
-Paired-difference confidence intervals, retrieval, attribution, and broader
-augmentation ablations remain separate work. They are not implemented by the
-reference notebook either. The updated protocol requires new preparation,
-matching smoke checks and augmentation review before full reference training.
+A displayed augmentation preview requires the user's `reviewed` input unless
+its exact saved hash has already been reviewed. Completed development results
+require a user-supplied selection reason before all declared arms are locked.
+Neither decision is inferred from held-out data or automatically approved.
+Tests never run the real-data study: the loader stops before its execution
+section, sequencing tests substitute tasks, and kernel integration uses synthetic
+data. This changes notebook operation, not the scientific comparison.

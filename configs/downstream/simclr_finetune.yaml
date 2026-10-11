@@ -1,6 +1,0 @@
-extends: defaults.yaml
-mode: ssl_finetune
-ssl_method: simclr
-ssl_checkpoint: outputs/pretrain/simclr-resnet18-gpu-cache-seed42/best.pt
-output_dir: outputs/downstream/simclr-finetune-1pct-seed42
-learning_rate: 1.0e-05

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-
-from chexpert_ssl.ssl_methods import METHODS, _sinkhorn, build_ssl_method
+from notebook_runtime import METHODS, _sinkhorn, build_ssl_method
 
 
 @pytest.mark.parametrize("method_name", METHODS)

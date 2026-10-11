@@ -3,11 +3,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import notebook_runtime as run_experiments
 import pytest
-
-from chexpert_ssl.experiments import build_plan
-from chexpert_ssl.utils import config_signature, load_config, save_json
-from scripts import run_experiments
+from notebook_runtime import build_plan, config_signature, load_config, save_json
 
 
 @pytest.mark.parametrize(
@@ -27,7 +25,7 @@ def test_support_stages_ignore_unrelated_stale_experiment_plans(
         sys, "argv", ["run_experiments", "--config", str(matrix_path), "--stage", stage]
     )
     monkeypatch.setattr(
-        run_experiments.subprocess, "run", lambda command, **kwargs: calls.append(command)
+        run_experiments, "execute_task", lambda command, **kwargs: calls.append(command)
     )
 
     def unexpected_plan(_):
@@ -48,7 +46,7 @@ def test_support_stages_ignore_unrelated_stale_experiment_plans(
         matrix = load_config(matrix_path)
         matrix["downstream_templates"] = {"ssl_linear": "source-config.yaml"}
         save_json(matrix_path, matrix)
-    run_experiments.main()
+    run_experiments.run_experiments_cli()
     assert len(calls) == command_count
     assert legacy.read_bytes() == before
     assert not (root / "plan.json").exists()
@@ -68,7 +66,7 @@ def test_plan_reuses_legacy_numeric_string_without_rewriting_it(tmp_path, monkey
     monkeypatch.setattr(
         sys, "argv", ["run_experiments", "--config", str(matrix_path), "--stage", "plan"]
     )
-    run_experiments.main()
+    run_experiments.run_experiments_cli()
     assert path.read_bytes() == before
     assert load_config(path)["learning_rate"] == 0.00001
     assert load_config(Path(matrix["generated_dir"]) / "plan.json")["counts"]["downstream"] == 180

@@ -4,8 +4,7 @@ import gc
 
 import pytest
 import torch
-
-from chexpert_ssl.models import MultiLabelClassifier, build_encoder
+from notebook_runtime import MultiLabelClassifier, build_encoder
 
 
 @pytest.mark.parametrize(

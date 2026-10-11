@@ -1,5 +1,0 @@
-extends: defaults.yaml
-method: byol
-output_dir: outputs/pretrain/byol-resnet18-gpu-cache-seed42
-ssl:
-  momentum: 0.99

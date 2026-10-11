@@ -1,7 +1,0 @@
-extends: defaults.yaml
-method: nnclr
-output_dir: outputs/pretrain/nnclr-resnet18-gpu-cache-seed42
-ssl:
-  temperatures:
-    nnclr: 0.1
-  queue_size: 8192

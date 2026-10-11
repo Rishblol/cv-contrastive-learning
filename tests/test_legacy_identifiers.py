@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-
-from chexpert_ssl.data import assert_patient_disjoint, read_manifest, select_patient_cohort
-from chexpert_ssl.utils import save_json
+from notebook_runtime import (
+    assert_patient_disjoint,
+    read_manifest,
+    save_json,
+    select_patient_cohort,
+)
 
 
 @pytest.mark.parametrize("manifest_ids", [["1", "2"], ["00001", "00002"]])

@@ -3,10 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import torch
+from notebook_runtime import augment_grayscale_batch, ensure_grayscale_cache
 from PIL import Image
-
-from chexpert_ssl.gpu_augment import augment_grayscale_batch
-from chexpert_ssl.image_cache import ensure_grayscale_cache
 
 
 def test_grayscale_gpu_augmentation_returns_finite_normalized_rgb() -> None:

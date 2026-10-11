@@ -1,9 +1,0 @@
-extends: defaults.yaml
-method: swav
-output_dir: outputs/pretrain/swav-resnet18-gpu-cache-seed42
-ssl:
-  temperatures:
-    swav: 0.1
-  prototype_count: 300
-  sinkhorn_epsilon: 0.05
-  prototype_freeze_steps: 100

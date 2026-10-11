@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-
-from chexpert_ssl.losses import nt_xent_loss
-from chexpert_ssl.metrics import multilabel_metrics
+from notebook_runtime import multilabel_metrics, nt_xent_loss
 
 
 def test_nt_xent_loss_is_finite_and_differentiable() -> None:

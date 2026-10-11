@@ -7,25 +7,27 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from PIL import Image
-
-from chexpert_ssl.data import TARGETS, read_manifest, select_patient_cohort
-from chexpert_ssl.experiments import build_plan
-from chexpert_ssl.models import MultiLabelClassifier
-from chexpert_ssl.selection import lock_run, verify_selection
-from chexpert_ssl.ssl_methods import METHODS
-from chexpert_ssl.utils import (
+from notebook_runtime import (
+    METHODS,
+    TARGETS,
+    MultiLabelClassifier,
     artifact_lock,
+    build_plan,
     capture_rng_state,
+    collect_results,
     config_signature,
+    evaluate,
     load_config,
+    lock_run,
+    read_manifest,
     restore_rng_state,
     save_json,
+    select_patient_cohort,
+    train_downstream,
+    train_pretrain,
+    verify_selection,
 )
-from scripts.aggregate_results import collect_results
-from scripts.evaluate_checkpoint import evaluate
-from scripts.train_downstream import train as train_downstream
-from scripts.train_pretrain import train as train_pretrain
+from PIL import Image
 
 
 def write_records(root: Path, partition: str, start: int, patients: int) -> Path:
@@ -175,7 +177,7 @@ def test_each_ssl_pretraining_writes_and_resumes_artifacts(
     with pytest.raises(ValueError, match="Checkpoint settings"):
         train_pretrain(changed)
     assert (output / "run_metadata.json").read_bytes() == before
-    import chexpert_ssl.utils as utilities
+    import notebook_runtime as utilities
 
     monkeypatch.setattr(utilities, "implementation_hash", lambda _: "changed-implementation")
     with pytest.raises(ValueError, match="Checkpoint settings"):
@@ -282,11 +284,11 @@ def test_artifact_lock_rejects_concurrent_writers_and_releases(tmp_path):
 def test_interrupted_pretraining_matches_uninterrupted_run(
     tmp_path, synthetic_data, monkeypatch, method
 ):
-    import scripts.train_pretrain as entry
+    import notebook_runtime as entry
 
     config = pretrain_config(tmp_path, synthetic_data, method)
     config["epochs"] = 2
-    entry.train(config)
+    entry.train_pretrain(config)
     expected = torch.load(Path(config["output_dir"]) / "last.pt", weights_only=False)["model"]
     interrupted = {**config, "output_dir": str(tmp_path / "interrupted")}
     original_save = entry.atomic_torch_save
@@ -298,21 +300,21 @@ def test_interrupted_pretraining_matches_uninterrupted_run(
 
     monkeypatch.setattr(entry, "atomic_torch_save", interrupt_after_checkpoint)
     with pytest.raises(RuntimeError, match="simulated interruption"):
-        entry.train(interrupted)
+        entry.train_pretrain(interrupted)
     assert load_config(Path(interrupted["output_dir"]) / "run_metadata.json")["status"] == "failed"
     monkeypatch.setattr(entry, "atomic_torch_save", original_save)
-    entry.train(interrupted)
+    entry.train_pretrain(interrupted)
     actual = torch.load(Path(interrupted["output_dir"]) / "last.pt", weights_only=False)["model"]
     for key in expected:
         torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
 
 
 def test_interrupted_downstream_matches_uninterrupted_run(tmp_path, synthetic_data, monkeypatch):
-    import scripts.train_downstream as entry
+    import notebook_runtime as entry
 
     config = downstream_config(tmp_path, synthetic_data)
-    config.update(epochs=2, num_workers=1)
-    entry.train(config)
+    config.update(epochs=2, num_workers=0)
+    entry.train_downstream(config)
     expected = torch.load(Path(config["output_dir"]) / "last.pt", weights_only=False)["model"]
     interrupted = {**config, "output_dir": str(tmp_path / "interrupted")}
     original_save = entry.atomic_torch_save
@@ -324,9 +326,9 @@ def test_interrupted_downstream_matches_uninterrupted_run(tmp_path, synthetic_da
 
     monkeypatch.setattr(entry, "atomic_torch_save", interrupt_after_checkpoint)
     with pytest.raises(RuntimeError, match="simulated interruption"):
-        entry.train(interrupted)
+        entry.train_downstream(interrupted)
     monkeypatch.setattr(entry, "atomic_torch_save", original_save)
-    entry.train(interrupted)
+    entry.train_downstream(interrupted)
     actual = torch.load(Path(interrupted["output_dir"]) / "last.pt", weights_only=False)["model"]
     for key in expected:
         torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
@@ -372,7 +374,7 @@ def test_imagenet_training_pins_weights_and_evaluation_never_downloads(
 def test_prepare_data_config_produces_canonical_manifests_and_nested_cohorts(tmp_path, monkeypatch):
     import sys
 
-    from scripts.prepare_data import main
+    from notebook_runtime import prepare_data_cli as main
 
     root = tmp_path / "dataset"
     root.mkdir()
@@ -400,10 +402,20 @@ def test_prepare_data_config_produces_canonical_manifests_and_nested_cohorts(tmp
     )
     monkeypatch.setattr(sys, "argv", ["prepare_data", "--config", str(config)])
     main()
+    from notebook_runtime import prepare_or_reuse_data
+
+    matrix_path = tmp_path / "matrix.json"
+    save_json(matrix_path, {"data_config": str(config)})
+    before_cohorts = {p.name: p.read_bytes() for p in (output.parent / "splits").glob("*.json")}
+    prepare_or_reuse_data(matrix_path)
+    assert before_cohorts == {
+        p.name: p.read_bytes() for p in (output.parent / "splits").glob("*.json")
+    }
     pretrain = read_manifest(output / "pretrain_train_leakage_free.csv", labeled=False)
     assert (output / "pretrain_train.csv").read_bytes() == (
         output / "pretrain_train_leakage_free.csv"
     ).read_bytes()
+    assert "final_validation" not in load_config(output / "data_report.json")["prevalence"]
     splits = output.parent / "splits"
     train_ids = set(pd.read_csv(splits / "train_patients.csv", dtype=str).patient_id)
     dev_ids = set(pd.read_csv(splits / "development_patients.csv", dtype=str).patient_id)
@@ -506,7 +518,7 @@ def test_notebook_profile_pretraining_and_transfer(tmp_path, synthetic_data, met
 
 @pytest.mark.parametrize("mode", ["supervised", "ssl_linear"])
 def test_notebook_cached_downstream_resume(tmp_path, synthetic_data, monkeypatch, mode):
-    import scripts.train_downstream as entry
+    import notebook_runtime as entry
 
     train, dev, _, _ = synthetic_data
     source = tmp_path / "all_training.csv"
@@ -535,7 +547,7 @@ def test_notebook_cached_downstream_resume(tmp_path, synthetic_data, monkeypatch
         pos_weight_max=50,
         notebook_sampling=True,
     )
-    entry.train(config)
+    entry.train_downstream(config)
     expected = torch.load(Path(config["output_dir"]) / "last.pt", weights_only=False)
     interrupted = {**config, "output_dir": str(tmp_path / "interrupted")}
     original_save = entry.atomic_torch_save
@@ -547,10 +559,42 @@ def test_notebook_cached_downstream_resume(tmp_path, synthetic_data, monkeypatch
 
     monkeypatch.setattr(entry, "atomic_torch_save", interrupt_after_checkpoint)
     with pytest.raises(RuntimeError, match="simulated interruption"):
-        entry.train(interrupted)
+        entry.train_downstream(interrupted)
     monkeypatch.setattr(entry, "atomic_torch_save", original_save)
-    entry.train(interrupted)
+    entry.train_downstream(interrupted)
     actual = torch.load(Path(interrupted["output_dir"]) / "last.pt", weights_only=False)
     for key in expected["model"]:
         torch.testing.assert_close(actual["model"][key], expected["model"][key], rtol=0, atol=0)
     assert actual["scheduler"] == expected["scheduler"]
+
+
+def test_run_all_selection_requires_reason_and_reuses_verified_locks(
+    tmp_path, synthetic_data, monkeypatch
+):
+    import notebook_runtime as runtime
+
+    config = downstream_config(tmp_path, synthetic_data)
+    train_downstream(config)
+    run = Path(config["output_dir"])
+    evaluation = {
+        "checkpoint": str(run / "best.pt"),
+        "thresholds": str(run / "thresholds.json"),
+        "selection_lock": str(run / "selection_lock.json"),
+        "manifest": "must-not-read-held-out.csv",
+    }
+    matrix_path = tmp_path / "matrix.json"
+    save_json(matrix_path, {"pretrain_output_root": str(tmp_path / "pretrain")})
+    monkeypatch.setattr(runtime, "build_plan", lambda _: {"evaluate": [evaluation]})
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    with pytest.raises(RuntimeError, match="No selection reason"):
+        runtime.lock_study_selection(matrix_path)
+    assert not (run / "selection_lock.json").exists()
+    monkeypatch.setattr("builtins.input", lambda _: "Reviewed synthetic development comparison")
+    runtime.lock_study_selection(matrix_path)
+    monkeypatch.setattr(
+        "builtins.input", lambda _: pytest.fail("Existing verified lock should be reused")
+    )
+    runtime.lock_study_selection(matrix_path)
+    save_json(run / "thresholds.json", {"invalid": 0.5})
+    with pytest.raises(ValueError, match="changed after locking"):
+        runtime.lock_study_selection(matrix_path)

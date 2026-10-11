@@ -1,5 +1,0 @@
-extends: defaults.yaml
-method: simclr
-output_dir: outputs/pretrain/simclr-resnet18-gpu-cache-seed42
-ssl:
-  temperature: 0.2

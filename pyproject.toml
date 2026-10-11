@@ -19,17 +19,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "nbformat>=5.10", "nbclient>=0.10", "ipykernel>=6.29"]
+notebook = ["jupyterlab>=4.0", "ipykernel>=6.29"]
 vlm = ["transformers>=4.44", "safetensors>=0.4"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = []
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "."]
+pythonpath = ["tests", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
-extend-exclude = ["chexpert_ssl_colab.ipynb"]
 line-length = 100
 target-version = "py310"

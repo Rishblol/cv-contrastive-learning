@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-
-from chexpert_ssl.data import (
+from notebook_runtime import (
     TARGETS,
     assert_patient_disjoint,
     exclude_development_patients,
+    nested_patient_ids,
     resolve_target,
-    sample_patient_budget,
+    save_json,
+    select_patient_cohort,
 )
 
 
@@ -40,14 +41,17 @@ def test_pretraining_manifest_repair_filters_development_patients() -> None:
     assert not set(repaired["patient_id"]) & set(development["patient_id"])
 
 
-def test_patient_budget_keeps_all_studies_for_selected_patients() -> None:
+def test_patient_budget_keeps_all_studies_for_selected_patients(tmp_path) -> None:
     frame = pd.DataFrame(
         {
             "patient_id": ["1", "1", "2", "2", "3", "3", "4", "4"],
             **{f"target_{target}": [0] * 8 for target in TARGETS},
         }
     )
-    sampled = sample_patient_budget(frame, fraction=0.5, seed=3)
+    patients = nested_patient_ids(frame, [0.5], seed=3)[0.5]
+    cohort = tmp_path / "cohort.json"
+    save_json(cohort, {"seed": 3, "label_fraction": 0.5, "patient_ids": patients})
+    sampled = select_patient_cohort(frame, cohort, fraction=0.5, seed=3)
     counts = sampled.groupby("patient_id").size()
     assert len(counts) == 2
     assert set(counts) == {2}

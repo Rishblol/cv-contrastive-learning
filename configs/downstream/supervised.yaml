@@ -1,4 +1,0 @@
-extends: defaults.yaml
-mode: supervised
-output_dir: outputs/downstream/supervised-1pct-seed42
-learning_rate: 0.0001
